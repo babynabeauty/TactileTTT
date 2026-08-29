@@ -1,0 +1,15 @@
+.git
+env/
+.venv/
+.uv-cache/
+.uv-python/
+__pycache__/
+*.pyc
+
+data/
+checkpoints/
+logs/
+wandb/
+outputs/
+.hf_datasets_cache/
+.cache/
