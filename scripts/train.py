@@ -133,6 +133,12 @@ def _load_weights_and_validate(loader, params_shape):
     failed_keys = []
 
     for k, v in flat_shape.items():
+        # Bias-free NNX Linear layers keep a structural ``bias=None`` entry in
+        # their pure state dictionary.  It is not a parameter and must not be
+        # counted as a missing checkpoint array.
+        if not hasattr(v, "shape"):
+            continue
+
         loaded_v = flat_loaded.get(k, None)
         reason = None
 
@@ -148,15 +154,13 @@ def _load_weights_and_validate(loader, params_shape):
         if reason is None:
             filtered[k] = loaded_v
         else:
-            filtered[k] = v  # use initialized
             failed_keys.append((k, reason))
 
-    # Remove any ShapeDtypeStruct accidentally left
-    filtered = {
-        k: v for k, v in filtered.items() if not isinstance(v, ShapeDtypeStruct)
-    }
+    # Shape-only checkpoint leaves represent parameters that should retain the
+    # model's random initialization, so omit them from the partial replacement.
+    filtered = {k: v for k, v in filtered.items() if not isinstance(v, ShapeDtypeStruct)}
 
-    total = len(flat_shape)
+    total = sum(hasattr(v, "shape") for v in flat_shape.values())
     loaded = total - len(failed_keys)
     print(f"\n[INFO] Loaded {loaded}/{total} parameters successfully.")
     if failed_keys:
@@ -528,13 +532,17 @@ def main(config: _config.TrainConfig):
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
     # 打印可训练参数名
     trainable_params = train_state.params.filter(config.trainable_filter)
-    flat = traverse_util.flatten_dict(trainable_params.to_pure_dict())
+    flat = {
+        key: value
+        for key, value in traverse_util.flatten_dict(trainable_params.to_pure_dict()).items()
+        if hasattr(value, "shape")
+    }
     
     # ================= 新增开始 =================
     all_params_flat = traverse_util.flatten_dict(train_state.params.to_pure_dict())
     
     total_params_cnt = sum(np.prod(v.shape) for v in all_params_flat.values() if hasattr(v, "shape"))
-    trainable_params_cnt = sum(np.prod(v.shape) for v in flat.values() if hasattr(v, "shape"))
+    trainable_params_cnt = sum(np.prod(v.shape) for v in flat.values())
     
     logging.info(f"Total parameters: {total_params_cnt:,}")
     logging.info(f"Trainable parameters: {trainable_params_cnt:,} ({trainable_params_cnt/total_params_cnt*100:.2f}%)")
