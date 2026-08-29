@@ -80,6 +80,29 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
         wandb.run.log_code(epath.Path(__file__).parent.parent)
 
 
+def _prepare_wandb_image(image: Any, sample_index: int) -> np.ndarray:
+    """Select one RGB frame and convert it to uint8 for W&B logging.
+
+    Regular training batches contain ``[B, H, W, C]`` images, while TTT
+    sequence training adds a sequence axis and produces ``[B, S, H, W, C]``.
+    W&B/PIL accepts only a single ``[H, W, C]`` image.
+    """
+    image = np.asarray(image[sample_index])
+    if image.ndim == 4:
+        image = image[0]
+    if image.ndim != 3:
+        raise ValueError(f"Expected an HWC image for W&B logging, got shape {image.shape}.")
+
+    if image.dtype != np.uint8:
+        image = np.asarray(image, dtype=np.float32)
+        if image.size and image.min() >= -1.0 and image.max() <= 1.0:
+            if image.min() < 0.0:
+                image = (image + 1.0) / 2.0
+            image = image * 255.0
+        image = np.clip(image, 0.0, 255.0).astype(np.uint8)
+    return image
+
+
 # def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shape: at.Params) -> at.Params:
 #     """Loads and validates the weights. Returns a loaded subset of the weights."""
 #     loaded_params = loader.load(params_shape)
@@ -471,7 +494,12 @@ def main(config: _config.TrainConfig):
     # configs intentionally omit images.
     if batch[0].images:
         images_to_log = [
-            wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
+            wandb.Image(
+                np.concatenate(
+                    [_prepare_wandb_image(img, i) for img in batch[0].images.values()],
+                    axis=1,
+                )
+            )
             for i in range(min(5, len(next(iter(batch[0].images.values())))))
         ]
         wandb.log({"camera_views": images_to_log}, step=0)
