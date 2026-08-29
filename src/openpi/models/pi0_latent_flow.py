@@ -2412,42 +2412,53 @@ class Pi0LatentFlow(_model.BaseModel):
         else:
             sequence_mask = jnp.asarray(sequence_mask, dtype=jnp.float32)
 
-        fast_weight = self.initial_tactile_ttt_state(batch_size)
-        losses = []
-        per_step_stats: list[dict[str, at.Array]] = []
+        initial_fast_weight = self.initial_tactile_ttt_state(batch_size)
         step_rngs = jax.random.split(rng, sequence_length)
-        for step_index in range(sequence_length):
-            step_observation = jax.tree.map(
-                lambda value, index=step_index: value[:, index],
-                observation,
-            )
-            step_observation = step_observation.replace(sequence_mask=None)
-            active = sequence_mask[:, step_index]
+        time_observation = jax.tree.map(
+            lambda value: jnp.swapaxes(value, 0, 1),
+            observation.replace(sequence_mask=None),
+        )
+        time_actions = jnp.swapaxes(actions, 0, 1)
+        time_active = jnp.swapaxes(sequence_mask, 0, 1)
+
+        def scan_step(fast_weight, step_inputs):
+            step_rng, step_observation, step_actions, active = step_inputs
             step_loss, step_stats, fast_weight = self._compute_chunk_loss_with_stats(
-                step_rngs[step_index],
+                step_rng,
                 step_observation,
-                actions[:, step_index],
+                step_actions,
                 train=train,
                 train_progress=train_progress,
                 tactile_ttt_state=fast_weight,
                 sequence_active=active,
             )
-            losses.append(step_loss)
-            per_step_stats.append(step_stats)
+            return fast_weight, (step_loss, step_stats)
 
-        stacked_losses = jnp.stack(losses, axis=1)
+        # A Python loop materializes one full pi0.5 graph per episode chunk and
+        # makes XLA compilation scale linearly with sequence length.  ``scan``
+        # traces one chunk body while preserving the identical causal fast-weight
+        # update and end-to-end gradient through the sequence.  Rematerializing
+        # the body bounds activation memory during the backward pass.
+        scan_body = jax.checkpoint(scan_step) if train else scan_step
+        _, (time_losses, time_stats) = jax.lax.scan(
+            scan_body,
+            initial_fast_weight,
+            (step_rngs, time_observation, time_actions, time_active),
+        )
+
+        stacked_losses = jnp.swapaxes(time_losses, 0, 1)
         denominator = jnp.maximum(jnp.sum(sequence_mask, axis=1), 1.0)
         sequence_loss = jnp.sum(stacked_losses * sequence_mask, axis=1) / denominator
 
         reduced_stats = {}
-        for key in per_step_stats[0]:
-            values = []
-            for step_stats in per_step_stats:
-                value = jnp.asarray(step_stats[key])
-                if value.ndim == 0:
-                    value = jnp.broadcast_to(value, (batch_size,))
-                values.append(value)
-            stacked = jnp.stack(values, axis=1)
+        for key, time_values in time_stats.items():
+            time_values = jnp.asarray(time_values)
+            if time_values.ndim == 1:
+                # The chunk returned a scalar statistic, so scan produced [S].
+                stacked = jnp.broadcast_to(time_values[None, :], (batch_size, sequence_length))
+            else:
+                # Per-example chunk statistics are [S,B,...] after scan.
+                stacked = jnp.swapaxes(time_values, 0, 1)
             mask = sequence_mask
             while mask.ndim < stacked.ndim:
                 mask = mask[..., None]

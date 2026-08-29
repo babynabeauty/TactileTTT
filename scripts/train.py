@@ -3,7 +3,17 @@ import functools
 import logging
 import pathlib
 import platform
+import sys
 from typing import Any
+
+# ``scripts/train.py`` may be launched with a virtual environment whose
+# editable ``openpi`` install still points at FactileLDM.  Always prefer this
+# repository's source tree so TactileTTT cannot silently train old code.
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+_LOCAL_SRC = _REPO_ROOT / "src"
+if str(_LOCAL_SRC) not in sys.path:
+    sys.path.insert(0, str(_LOCAL_SRC))
+
 import openpi.training.checkpoints as _checkpoints
 import etils.epath as epath
 import flax.nnx as nnx
@@ -449,6 +459,7 @@ def _run_validation(
 def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
+    logging.info("Using openpi source: %s", pathlib.Path(_config.__file__).resolve())
 
     if config.batch_size % jax.device_count() != 0:
         raise ValueError(
