@@ -123,6 +123,8 @@ class DataConfig:
     model_transforms: _transforms.Group = dataclasses.field(default_factory=_transforms.Group)
     # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
     use_quantile_norm: bool = False
+    # Keys that should use z-score normalization even when use_quantile_norm is true.
+    zscore_norm_keys: Sequence[str] = ()
 
     # Names of keys that will be used by the data loader to generate the action sequence. The length of the
     # sequence is defined by the `action_horizon` field in the model config. This should be adjusted if your
@@ -224,6 +226,8 @@ class DataConfigFactory(abc.ABC):
     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
     # Base config that will be updated by the factory.
     base_config: tyro.conf.Suppress[DataConfig | None] = None
+    # Per-modality override for sparse inputs such as raw tactile force.
+    zscore_norm_keys: Sequence[str] = ()
 
     @abc.abstractmethod
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -238,6 +242,7 @@ class DataConfigFactory(abc.ABC):
             asset_id=asset_id,
             norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id),
             use_quantile_norm=model_config.model_type != ModelType.PI0,
+            zscore_norm_keys=self.zscore_norm_keys,
         )
 
     def _load_norm_stats(self, assets_dir: epath.Path, asset_id: str | None) -> dict[str, _transforms.NormStats] | None:
@@ -589,6 +594,7 @@ class LeRobotXHandTactileFlowDataConfig(DataConfigFactory):
                     model_type=model_config.model_type,
                     tactile_mode=self.tactile_mode,
                     structured_tactile=self.structured_tactile,
+                    include_tactile_contact_force=bool(getattr(model_config, "tactile_ttt_enabled", False)),
                     tactile_history_frames=history_frames,
                     primary_image_key=self.primary_image_key,
                     wrist_image_key=self.wrist_image_key,
@@ -2283,6 +2289,8 @@ def _pi05_tactile_ttt_v0_config(source_name: str, new_name: str) -> TrainConfig:
             tactile_ttt_memory_dim=256,
             tactile_ttt_inner_lr=0.1,
             tactile_ttt_write_segments=4,
+            tactile_ttt_contact_threshold=4.3,
+            tactile_ttt_contact_temperature=0.5,
             use_future_flow=False,
             tactile_refiner_enabled=False,
             async_tactile_refiner_enabled=False,
@@ -2298,6 +2306,7 @@ def _pi05_tactile_ttt_v0_config(source_name: str, new_name: str) -> TrainConfig:
             state_delta_timestamps=tuple(range(-15, 1)),
             future_flow_key=None,
             future_wrist_flow_key=None,
+            zscore_norm_keys=("effort",),
         ),
         weight_loader=weight_loaders.Pi0WithPatchTactileEncoderWeightLoader(
             pi0_params_path="checkpoints/pi05_base/params",
@@ -2357,6 +2366,7 @@ def _pi05_direct_tactile_config(
             state_delta_timestamps=history_offsets,
             future_flow_key=None,
             future_wrist_flow_key=None,
+            zscore_norm_keys=("effort",),
         ),
         weight_loader=weight_loaders.Pi0WithPatchTactileEncoderWeightLoader(
             pi0_params_path="checkpoints/pi05_base/params",

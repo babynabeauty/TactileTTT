@@ -20,7 +20,6 @@ class TactileTTTMemory(nnx.Module):
         token_dim: int,
         memory_dim: int,
         inner_lr: float,
-        contact_top_k: int,
         contact_threshold: float,
         contact_temperature: float,
         rngs: nnx.Rngs,
@@ -28,7 +27,6 @@ class TactileTTTMemory(nnx.Module):
         self.token_dim = int(token_dim)
         self.memory_dim = int(memory_dim)
         self.inner_lr = float(inner_lr)
-        self.contact_top_k = int(contact_top_k)
         self.contact_threshold = float(contact_threshold)
         self.contact_temperature = float(contact_temperature)
 
@@ -47,20 +45,18 @@ class TactileTTTMemory(nnx.Module):
         weight = jnp.asarray(self.fast_weight_init.value, dtype=dtype)
         return jnp.broadcast_to(weight[None, :, :], (batch_size, self.memory_dim, self.memory_dim))
 
-    def contact_gate(self, raw_tactile: jax.Array) -> jax.Array:
+    def contact_gate(self, contact_force: jax.Array) -> jax.Array:
         """Return one soft write gate per batch item.
 
         Args:
-            raw_tactile: ``[B, T, F, P, 3]`` normalized raw-taxel forces.
+            contact_force: Unnormalized calc_force in Newtons, ``[B, T, F, 3]``.
         """
-        magnitude = jnp.linalg.norm(raw_tactile.astype(jnp.float32), axis=-1)
-        temperature = jnp.asarray(self.contact_temperature, dtype=jnp.float32)
-        taxel_gate = jax.nn.sigmoid((magnitude - self.contact_threshold) / temperature)
-
-        k = min(self.contact_top_k, taxel_gate.shape[-1])
-        top_contact = jnp.sort(taxel_gate, axis=-1)[..., -k:]
-        finger_frame_score = jnp.mean(top_contact, axis=-1)
-        return jnp.max(finger_frame_score, axis=(1, 2))
+        if contact_force.ndim != 4 or contact_force.shape[-1] != 3:
+            raise ValueError(f"Expected contact_force [B,T,F,3], got {contact_force.shape}.")
+        magnitude = jnp.linalg.norm(contact_force.astype(jnp.float32), axis=-1)
+        score = jnp.max(magnitude, axis=(1, 2))
+        temperature = jnp.asarray(max(self.contact_temperature, 1e-6), dtype=jnp.float32)
+        return jax.nn.sigmoid((score - self.contact_threshold) / temperature)
 
     def update(
         self,
@@ -97,18 +93,30 @@ class TactileTTTMemory(nnx.Module):
         fast_weight: jax.Array,
         write_tokens: jax.Array,
         current_tokens: jax.Array,
-        raw_tactile: jax.Array,
+        contact_force: jax.Array,
         *,
         active: jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array, dict[str, jax.Array]]:
-        write_gate = self.contact_gate(raw_tactile)
+        write_gate = self.contact_gate(contact_force)
         if active is not None:
             write_gate = write_gate * active.astype(write_gate.dtype)
         updated_weight, reconstruction_loss = self.update(fast_weight, write_tokens, write_gate)
         enhanced_tokens = self.read(updated_weight, current_tokens)
+        residual_gate_raw = jnp.asarray(self.residual_gate.value, dtype=jnp.float32)
+        residual_gate = jnp.tanh(residual_gate_raw)
+        memory_contribution = enhanced_tokens.astype(jnp.float32) - current_tokens.astype(jnp.float32)
+        memory_contribution_norm = jnp.linalg.norm(memory_contribution, axis=(1, 2))
+        current_token_norm = jnp.linalg.norm(current_tokens.astype(jnp.float32), axis=(1, 2))
         stats = {
             "contact_gate": write_gate,
             "reconstruction": reconstruction_loss,
             "fast_weight_norm": jnp.linalg.norm(updated_weight.astype(jnp.float32), axis=(1, 2)),
+            "fast_weight_update_norm": jnp.linalg.norm(
+                updated_weight.astype(jnp.float32) - fast_weight.astype(jnp.float32), axis=(1, 2)
+            ),
+            "residual_gate_raw": jnp.broadcast_to(residual_gate_raw, write_gate.shape),
+            "residual_gate": jnp.broadcast_to(residual_gate, write_gate.shape),
+            "memory_contribution_norm": memory_contribution_norm,
+            "memory_to_current_ratio": memory_contribution_norm / (current_token_norm + 1e-6),
         }
         return enhanced_tokens, updated_weight, stats

@@ -421,9 +421,8 @@ class Pi0LatentFlow(_model.BaseModel):
                     token_dim=student_config.width,
                     memory_dim=config.tactile_ttt_memory_dim,
                     inner_lr=config.tactile_ttt_inner_lr,
-                    contact_top_k=config.tactile_raw_contact_top_k,
-                    contact_threshold=config.tactile_raw_contact_threshold,
-                    contact_temperature=config.tactile_raw_contact_temperature,
+                    contact_threshold=config.tactile_ttt_contact_threshold,
+                    contact_temperature=config.tactile_ttt_contact_temperature,
                     rngs=rngs,
                 )
         else:
@@ -735,6 +734,7 @@ class Pi0LatentFlow(_model.BaseModel):
     def _tactile_ttt_step(
         self,
         history_effort: at.Array,
+        contact_force: at.Array,
         fast_weight: at.Array | None,
         *,
         active: at.Array | None = None,
@@ -759,9 +759,21 @@ class Pi0LatentFlow(_model.BaseModel):
             fast_weight,
             write_tokens,
             current_tokens,
-            history_effort,
+            contact_force,
             active=active,
         )
+
+    def _tactile_contact_force(self, observation: _model.Observation) -> at.Array:
+        contact_force = observation.tactile_contact_force
+        if contact_force is None:
+            raise ValueError(
+                "TactileTTT requires unnormalized `tactile_contact_force` extracted from calc_force."
+            )
+        contact_force = jnp.asarray(contact_force, dtype=jnp.float32)
+        expected = (self.force_input_frames, self.tactile_num_fingers, 3)
+        if contact_force.ndim != 4 or contact_force.shape[1:] != expected:
+            raise ValueError(f"Expected tactile_contact_force [B,{expected}], got {contact_force.shape}.")
+        return contact_force
 
     def _project_history_force_teacher(
         self, history_effort: at.Array
@@ -2013,6 +2025,7 @@ class Pi0LatentFlow(_model.BaseModel):
         if self.tactile_ttt_enabled:
             history_token_override, tactile_ttt_state, tactile_ttt_stats = self._tactile_ttt_step(
                 history_effort,
+                self._tactile_contact_force(observation),
                 tactile_ttt_state,
                 active=sequence_active,
             )
@@ -2368,6 +2381,11 @@ class Pi0LatentFlow(_model.BaseModel):
                     "tactile_ttt/contact_gate": tactile_ttt_stats["contact_gate"],
                     "tactile_ttt/reconstruction": tactile_ttt_stats["reconstruction"],
                     "tactile_ttt/fast_weight_norm": tactile_ttt_stats["fast_weight_norm"],
+                    "tactile_ttt/fast_weight_update_norm": tactile_ttt_stats["fast_weight_update_norm"],
+                    "tactile_ttt/residual_gate_raw": tactile_ttt_stats["residual_gate_raw"],
+                    "tactile_ttt/residual_gate": tactile_ttt_stats["residual_gate"],
+                    "tactile_ttt/memory_contribution_norm": tactile_ttt_stats["memory_contribution_norm"],
+                    "tactile_ttt/memory_to_current_ratio": tactile_ttt_stats["memory_to_current_ratio"],
                 }
             )
         return total_loss, stats, tactile_ttt_state
@@ -2582,6 +2600,7 @@ class Pi0LatentFlow(_model.BaseModel):
         history_effort, _ = self._split_effort(observation, require_future=False, dtype=jnp.float32)
         history_tokens, tactile_ttt_state, tactile_ttt_stats = self._tactile_ttt_step(
             history_effort,
+            self._tactile_contact_force(observation),
             tactile_ttt_state,
         )
 

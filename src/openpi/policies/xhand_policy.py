@@ -382,6 +382,7 @@ class XHandTactileFlowInputs(transforms.DataTransformFn):
     model_type: _model.ModelType
     tactile_mode: Literal["calc_force", "raw_force"] = "calc_force"
     structured_tactile: bool = False
+    include_tactile_contact_force: bool = False
     tactile_history_frames: int = 10
     state_dim: int = 18
     primary_image_key: str = "observation.images.cam_front"
@@ -416,6 +417,11 @@ class XHandTactileFlowInputs(transforms.DataTransformFn):
                 "left_wrist_0_rgb": np.True_,
             },
         }
+        if self.include_tactile_contact_force:
+            # Keep physical resultant force separate from `effort`: raw-taxel
+            # effort is normalized for the TPE, while the contact gate needs
+            # calc_force in its original Newton scale.
+            inputs["tactile_contact_force"] = self._extract_calc_force(state_seq)
 
         extra_camera = "cam_right" if self.extra_image_key and "cam_right" in self.extra_image_key else "cam_left"
         extra_image = _get_optional(data, _image_keys(self.extra_image_key, extra_camera)) if self.extra_image_key else None
@@ -519,6 +525,12 @@ class XHandTactileFlowInputs(transforms.DataTransformFn):
             raise ValueError(f"Unsupported tactile_mode={self.tactile_mode!r}.")
 
         return tactile.astype(np.float32)
+
+    def _extract_calc_force(self, state_seq: np.ndarray) -> np.ndarray:
+        return np.stack(
+            [_extract_current_calc_force(state) for state in state_seq],
+            axis=0,
+        ).astype(np.float32)
 
 
 @dataclasses.dataclass(frozen=True)

@@ -125,23 +125,38 @@ class Normalize(DataTransformFn):
     norm_stats: at.PyTree[NormStats] | None
     # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
     use_quantiles: bool = False
+    # Flattened keys that should keep z-score normalization even when the rest
+    # of the observation uses quantile normalization. This is useful for sparse
+    # modalities such as raw tactile force, where q01 and q99 can coincide.
+    zscore_keys: Sequence[str] = ()
     # If true, will raise an error if any of the keys in the norm stats are not present in the data.
     strict: bool = False
 
     def __post_init__(self):
         if self.norm_stats is not None and self.use_quantiles:
-            _assert_quantile_stats(self.norm_stats)
+            quantile_stats, _ = self._split_norm_stats()
+            _assert_quantile_stats(quantile_stats)
 
     def __call__(self, data: DataDict) -> DataDict:
         if self.norm_stats is None:
             return data
 
-        return apply_tree(
-            data,
-            self.norm_stats,
-            self._normalize_quantile if self.use_quantiles else self._normalize,
-            strict=self.strict,
-        )
+        if not self.use_quantiles:
+            return apply_tree(data, self.norm_stats, self._normalize, strict=self.strict)
+
+        quantile_stats, zscore_stats = self._split_norm_stats()
+        data = apply_tree(data, quantile_stats, self._normalize_quantile, strict=self.strict)
+        return apply_tree(data, zscore_stats, self._normalize, strict=self.strict)
+
+    def _split_norm_stats(self) -> tuple[at.PyTree[NormStats], at.PyTree[NormStats]]:
+        if self.norm_stats is None:
+            return {}, {}
+
+        flat_stats = flatten_dict(self.norm_stats)
+        zscore_keys = set(self.zscore_keys)
+        quantile_stats = {key: value for key, value in flat_stats.items() if key not in zscore_keys}
+        zscore_stats = {key: value for key, value in flat_stats.items() if key in zscore_keys}
+        return unflatten_dict(quantile_stats), unflatten_dict(zscore_stats)
 
     def _normalize(self, x, stats: NormStats):
         if x.ndim >= 2 and stats.mean.shape[-1] == x.shape[-2] * x.shape[-1]:

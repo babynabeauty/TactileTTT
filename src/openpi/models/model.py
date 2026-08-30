@@ -106,6 +106,8 @@ class Observation(Generic[ArrayT]):
     tactile: at.Float[ArrayT, "*b f d"] | None = None
     # Shared force/tactile field. Obs-AE uses [*b,5,3].
     effort: ArrayT | None = None
+    # Unnormalized XHand calc_force in Newtons, used only for contact gating.
+    tactile_contact_force: at.Float[ArrayT, "*b t f d"] | None = None
 
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
@@ -137,6 +139,7 @@ class Observation(Generic[ArrayT]):
             state=data["state"],
             tactile=data.get("tactile"),
             effort=data.get("effort"),
+            tactile_contact_force=data.get("tactile_contact_force"),
             tokenized_prompt=data.get("tokenized_prompt"),
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
@@ -218,6 +221,7 @@ def preprocess_observation(
         state=observation.state,
         tactile=observation.tactile,
         effort=observation.effort,
+        tactile_contact_force=observation.tactile_contact_force,
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,

@@ -274,6 +274,8 @@ class Pi0LatentFlowConfig(Pi0Config):
     tactile_ttt_memory_dim: int = 256
     tactile_ttt_inner_lr: float = 0.1
     tactile_ttt_write_segments: int = 4
+    tactile_ttt_contact_threshold: float = 4.3
+    tactile_ttt_contact_temperature: float = 0.5
     future_tactile_align_layer: int = 12
     tactile_sample_hz: float = 15.0
     arm_hand_mask_attention: bool = False
@@ -403,8 +405,8 @@ class Pi0LatentFlowConfig(Pi0Config):
                     raise ValueError("TactileTTT write segments must exactly cover force_input_frames.")
                 if self.tactile_ttt_memory_dim <= 0 or self.tactile_ttt_inner_lr <= 0:
                     raise ValueError("TactileTTT memory_dim and inner_lr must be positive.")
-                if self.tactile_raw_contact_top_k <= 0:
-                    raise ValueError("TactileTTT requires tactile_raw_contact_top_k > 0.")
+                if self.tactile_ttt_contact_temperature <= 0:
+                    raise ValueError("TactileTTT contact temperature must be positive.")
                 if self.cached_vlm_async_ae_enabled or self.async_tactile_refiner_enabled:
                     raise ValueError("The first TactileTTT model does not use asynchronous action refinement.")
             object.__setattr__(self, "distill_layer_indices", (self.future_tactile_align_layer,))
@@ -574,6 +576,13 @@ class Pi0LatentFlowConfig(Pi0Config):
                 image_masks={key: image_mask_spec for key in _model.IMAGE_KEYS},
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 effort=jax.ShapeDtypeStruct(effort_shape, jnp.float32),
+                tactile_contact_force=(
+                    jax.ShapeDtypeStruct(
+                        [batch_size, self.force_input_frames, self.tactile_num_fingers, 3], jnp.float32
+                    )
+                    if self.tactile_ttt_enabled
+                    else None
+                ),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
             )

@@ -79,6 +79,34 @@ def test_structured_effort_normalization_preserves_per_finger_stats():
     assert np.allclose(normalized, 0)
 
 
+def test_effort_can_use_zscore_while_state_uses_quantile_normalization():
+    stats = {
+        "state": NormStats(
+            mean=np.array([5.0], dtype=np.float32),
+            std=np.array([2.0], dtype=np.float32),
+            q01=np.array([0.0], dtype=np.float32),
+            q99=np.array([20.0], dtype=np.float32),
+        ),
+        "effort": NormStats(
+            mean=np.array([1.0], dtype=np.float32),
+            std=np.array([2.0], dtype=np.float32),
+            q01=np.array([3.0], dtype=np.float32),
+            q99=np.array([3.0], dtype=np.float32),
+        ),
+    }
+    normalized = Normalize(stats, use_quantiles=True, zscore_keys=("effort",))(
+        {
+            "state": np.array([10.0], dtype=np.float32),
+            "effort": np.array([3.0], dtype=np.float32),
+            "tactile_contact_force": np.array([[[4.3, 0.0, 0.0]]], dtype=np.float32),
+        }
+    )
+
+    assert np.allclose(normalized["state"], 0.0)
+    assert np.allclose(normalized["effort"], 1.0)
+    assert np.allclose(normalized["tactile_contact_force"], [[[4.3, 0.0, 0.0]]])
+
+
 def test_raw_tactile_can_pool_causal_sixteen_frames_to_twenty_tokens():
     tokenizer = RawTactileSpatialTokenizer(
         output_dim=32,

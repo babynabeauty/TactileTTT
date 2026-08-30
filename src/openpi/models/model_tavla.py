@@ -110,6 +110,8 @@ class Observation(Generic[ArrayT]):
     # Effort(joint torque).
     # Legacy effort is [*b,T,D]; structured dexterous force is [*b,T,F,3].
     effort: ArrayT | None = None
+    # Unnormalized XHand calc_force in Newtons, used only for contact gating.
+    tactile_contact_force: at.Float[ArrayT, "*b t f d"] | None = None
     # Optional flow image, in [-1, 1] float32.
     flow_img: at.Float[ArrayT, "*b h w c"] | None = None
     # Optional wrist flow image, in [-1, 1] float32.
@@ -163,6 +165,7 @@ class Observation(Generic[ArrayT]):
             state=data["state"],
             tactile=data.get("tactile"),
             effort=data.get("effort", None),
+            tactile_contact_force=data.get("tactile_contact_force"),
             flow_img=data.get("flow_img"),
             wrist_flow_img=data.get("wrist_flow_img"),
             future_rgb_img=data.get("future_rgb_img"),
@@ -271,6 +274,7 @@ def preprocess_observation(
         state=state,
         tactile=observation.tactile,
         effort=effort,
+        tactile_contact_force=observation.tactile_contact_force,
         flow_img=observation.flow_img,
         wrist_flow_img=observation.wrist_flow_img,
         future_rgb_img=observation.future_rgb_img,
