@@ -23,314 +23,139 @@ ASSET_ID="$(basename "$DATA_REPO")"
 mkdir -p logs
 ```
 
-说明：
-- 统一使用 `HF_LEROBOT_HOME=/workspace/mnt/sqzhang26/FactileLDM`
-- 统一使用 `DATA_REPO=data/xxx`
-- 不要再使用 `HF_LEROBOT_HOME=/workspace/mnt/sqzhang26/FactileLDM/data`，否则容易变成 `data/data/xxx`
+# 合并数据集
+python scripts/merge_lerobot_v21_datasets.py \
+  --sources \
+    /workspace/mnt/sqzhang26/FactileLDM/data/0828_press_button/press_button_0 \
+    /workspace/mnt/sqzhang26/FactileLDM/data/0828_press_button/press_button_1 \
+    /workspace/mnt/sqzhang26/FactileLDM/data/0828_press_button/press_button_2 \
+  --output /workspace/mnt/sqzhang26/FactileLDM/data/press_button_4_times \
+  --overwrite
+  
+# 划分0.1的验证集
+python scripts/create_task_stratified_episode_split.py   --repo-id data/press_button_4_times   --output-dir outputs/episode_splits/press_button_4_times   --val-ratio 0.10   --min-val-per-task 1   --seed 42
 
-## 归一化
+# 计算归一化
+/workspace/mnt/sqzhang26/FactileLDM/env/.venv/bin/python scripts/compute_norm_stats.py \
+  --config-name pi05_tactile_current \
+  --repo-id data/press_button_4_times \
+  --asset-id press_button_4_times \
+  --batch-size 64 \
+  --num-workers 4
 
-### 自动并行生成三套归一化文件
+# 训练
 
-脚本会轮询空闲 GPU，并行生成 structured calc-force、非结构化 calc-force 和 structured raw 三套统计。
-默认要求空闲显存至少 50000 MiB、GPU 利用率不高于 20%。已有文件会自动跳过。
+export PROJECT_ROOT=$PWD
+export HF_LEROBOT_HOME=$PROJECT_ROOT
+export HF_DATASETS_CACHE=$PROJECT_ROOT/.hf_datasets_cache
+export HF_HUB_OFFLINE=1
 
-```bash
+DATA_REPO=data/press_button_4_times
+ASSET_ID=press_button_4_times
+ASSET_DIR=assets/pi05_tactile_current
+TRAIN_SPLIT=outputs/episode_splits/press_button_4_times/train_episodes.json
+VAL_SPLIT=outputs/episode_splits/press_button_4_times/val_episodes.json
+PATCH_ENCODER_PARAMS=/workspace/mnt/sqzhang26/FactileLDM/checkpoints/xhand_patch_tactile_encoder_pretrain/patch_informed_full_heads_taskall2_encoder_final_20k_0722/19999/params
+
+mkdir -p logs
+
+## TactileTTT
+setsid nohup env CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+/workspace/mnt/sqzhang26/FactileLDM/env/.venv/bin/python scripts/train.py \
+  pi05_tactile_ttt_v0 \
+  --exp-name pi05_tactile_ttt_v0_press_0829 \
+  --data.repo-id "$DATA_REPO" \
+  --data.assets.asset-id "$ASSET_ID" \
+  --data.assets.assets-dir "$ASSET_DIR" \
+  --train-filter-path "$TRAIN_SPLIT" \
+  --weight-loader.encoder-params-path "$PATCH_ENCODER_PARAMS" \
+  --num-train-steps 1000 \
+  --batch-size 8 \
+  --fsdp-devices 4 \
+  --num-workers 0 \
+  --lr-schedule.warmup-steps 100 \
+  --lr-schedule.peak-lr 2.5e-5 \
+  --lr-schedule.decay-steps 2000 \
+  --lr-schedule.decay-lr 2.5e-6 \
+  --save-interval 250 \
+  --keep-period 250 \
+  --eval-interval 250 \
+  --eval-num-batches 2 \
+  --eval-batch-size 8 \
+  --eval-num-workers 0 \
+  --eval-repo-id "$DATA_REPO" \
+  --eval-asset-id "$ASSET_ID" \
+  --eval-assets-dir "$ASSET_DIR" \
+  --eval-filter-path "$VAL_SPLIT" \
+  --no-wandb-enabled \
+  > logs/pi05_tactile_ttt_v0_press_0829.log 2>&1 &
+
+### pi05
+  setsid nohup env \
+CUDA_VISIBLE_DEVICES=4,5,6,7 \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+/workspace/mnt/sqzhang26/FactileLDM/env/.venv/bin/python scripts/train.py \
+  pi05_xhand_full_finetune_h16 \
+  --exp-name pi05_press_0829 \
+  --data.repo-id "$DATA_REPO" \
+  --data.assets.asset-id "$ASSET_ID" \
+  --data.assets.assets-dir "$ASSET_DIR" \
+  --train-filter-path "$TRAIN_SPLIT" \
+  --num-train-steps 30000 \
+  --batch-size 4 \
+  --fsdp-devices 1 \
+  --num-workers 0 \
+  --lr-schedule.warmup-steps 1000 \
+  --lr-schedule.peak-lr 2.5e-5 \
+  --lr-schedule.decay-steps 30000 \
+  --lr-schedule.decay-lr 2.5e-6 \
+  --save-interval 2500 \
+  --keep-period 5000 \
+  --eval-interval 1000 \
+  --eval-num-batches 2 \
+  --eval-batch-size 4 \
+  --eval-num-workers 0 \
+  --eval-repo-id "$DATA_REPO" \
+  --eval-asset-id "$ASSET_ID" \
+  --eval-assets-dir "$ASSET_DIR" \
+  --eval-filter-path "$VAL_SPLIT" \
+  --no-wandb-enabled \
+  > logs/pi05_press_0829.log 2>&1 &
+
+
+## pi05+16帧历史
 setsid nohup env \
-  GPU_IDS=0,1,2,3,4,5,6,7 \
-  MIN_FREE_MEMORY_MB=50000 \
-  MAX_GPU_UTIL=20 \
-  POLL_INTERVAL=30 \
-  bash scripts/run_xhand_norm_stats_parallel.sh "$DATA_REPO" \
-  > "logs/norm_scheduler_${ASSET_ID}.log" 2>&1 &
-```
-
-强制重新计算已有统计时增加：
-
-```bash
-OVERWRITE_NORM=1 bash scripts/run_xhand_norm_stats_parallel.sh "$DATA_REPO"
-```
-
-### 5x3 structured dual AE
-
-```bash
-env/.venv/bin/python scripts/compute_norm_stats.py \
-  --config-name pi0_xhand_tactile_structured_dual_ae \
-  --repo-id "$DATA_REPO" \
-  --asset-id "$ASSET_ID"
-```
-
-### 5x120x3 raw structured dual AE
-
-```bash
-env/.venv/bin/python scripts/compute_norm_stats.py \
-  --config-name pi0_xhand_tactile_structured_raw_dual_ae \
-  --repo-id "$DATA_REPO" \
-  --asset-id "$ASSET_ID"
-```
-
-### structured single AE
-
-```bash
-env/.venv/bin/python scripts/compute_norm_stats.py \
-  --config-name pi0_xhand_tactile_structured_single_ae \
-  --repo-id "$DATA_REPO" \
-  --asset-id "$ASSET_ID"
-```
-
-## 推荐训练命令
-
-### A. pi0 no tactile
-
-```bash
-setsid nohup env \
-  HF_LEROBOT_HOME="$PROJECT_ROOT" \
-  HF_DATASETS_CACHE=.hf_datasets_cache \
-  HF_HUB_OFFLINE=1 \
-  CUDA_VISIBLE_DEVICES=4,5,6,7 \
-  XLA_PYTHON_CLIENT_PREALLOCATE=false \
-  env/.venv/bin/python scripts/train.py \
-    pi0_xhand_full_finetune_h16 \
-    --exp-name pi0_xhand_full_finetune_h16_task12345_0706 \
-    --data.repo-id "$DATA_REPO" \
-    --data.assets.asset-id "$ASSET_ID" \
-    --data.assets.assets-dir assets/pi0_xhand_tactile_structured_raw_dual_ae \
-    --num-train-steps 50000 \
-    --batch-size 8 \
-    --fsdp-devices 1 \
-    --num-workers 2 \
-    --save-interval 5000 \
-    --keep-period 5000 \
-    --no-wandb-enabled \
-    --overwrite \
-    --weight-loader.params-path checkpoints/pi0_base/params \
-  > logs/pi0_xhand_full_finetune_h16_task12345_0706.log 2>&1 &
-```
-
-### B. current 5x3 tactile observation tokens
-
-obs-AE 已统一使用 `effort [5,3]`，直接复用 structured dual-AE 的归一化文件。
-
-```bash
-setsid nohup env \
-  HF_LEROBOT_HOME="$PROJECT_ROOT" \
-  HF_DATASETS_CACHE=.hf_datasets_cache \
-  HF_HUB_OFFLINE=1 \
-  CUDA_VISIBLE_DEVICES=0,1,2,3 \
-  XLA_PYTHON_CLIENT_PREALLOCATE=false \
-  env/.venv/bin/python scripts/train.py \
-    pi0_xhand_tactile_obs_ae_full_finetune \
-    --exp-name pi0_xhand_tactile_obs_ae_full_finetune_106ep_20k \
-    --data.repo-id "$DATA_REPO" \
-    --data.assets.asset-id "$ASSET_ID" \
-    --data.assets.assets-dir assets/pi0_xhand_tactile_structured_dual_ae \
-    --num-train-steps 20000 \
-    --batch-size 8 \
-    --fsdp-devices 4 \
-    --num-workers 2 \
-    --save-interval 5000 \
-    --keep-period 5000 \
-    --no-wandb-enabled \
-    --overwrite \
-    --weight-loader.params-path checkpoints/pi0_base/params \
-  > logs/pi0_xhand_tactile_obs_ae_full_finetune_106ep_20k.log 2>&1 &
-```
-
-### C. structured single AE
-
-```bash
-setsid nohup env \
-  HF_LEROBOT_HOME="$PROJECT_ROOT" \
-  HF_DATASETS_CACHE=.hf_datasets_cache \
-  HF_HUB_OFFLINE=1 \
-  CUDA_VISIBLE_DEVICES=0,1,2,3 \
-  XLA_PYTHON_CLIENT_PREALLOCATE=false \
-  env/.venv/bin/python scripts/train.py \
-    pi0_xhand_tactile_structured_single_ae \
-    --exp-name structured_single_ae_106ep_20k \
-    --data.repo-id "$DATA_REPO" \
-    --data.assets.asset-id "$ASSET_ID" \
-    --data.assets.assets-dir assets/pi0_xhand_tactile_structured_dual_ae \
-    --num-train-steps 20000 \
-    --batch-size 8 \
-    --fsdp-devices 4 \
-    --num-workers 2 \
-    --save-interval 5000 \
-    --keep-period 5000 \
-    --no-wandb-enabled \
-    --overwrite \
-    --weight-loader.params-path checkpoints/pi0_base/params \
-  > logs/structured_single_ae_106ep_20k.log 2>&1 &
-```
-
-### D. structured dual AE 5x3
-
-```bash
-setsid nohup env \
-  HF_LEROBOT_HOME="$PROJECT_ROOT" \
-  HF_DATASETS_CACHE=.hf_datasets_cache \
-  HF_HUB_OFFLINE=1 \
-  CUDA_VISIBLE_DEVICES=0,1,2,3 \
-  XLA_PYTHON_CLIENT_PREALLOCATE=false \
-  env/.venv/bin/python scripts/train.py \
-    pi0_xhand_tactile_structured_dual_ae \
-    --exp-name structured_dual_ae_106ep_20k \
-    --data.repo-id "$DATA_REPO" \
-    --data.assets.asset-id "$ASSET_ID" \
-    --num-train-steps 20000 \
-    --batch-size 8 \
-    --fsdp-devices 4 \
-    --num-workers 2 \
-    --save-interval 5000 \
-    --keep-period 5000 \
-    --no-wandb-enabled \
-    --overwrite \
-    --weight-loader.params-path checkpoints/pi0_base/params \
-  > logs/structured_dual_ae_106ep_20k.log 2>&1 &
-```
-
-### E. structured dual AE 5x3 + arm/future/hand mask
-
-这里复用 `pi0_xhand_tactile_structured_dual_ae` 的归一化文件，所以保留 `--data.assets.assets-dir`。
-
-DATA_REPO="data/grasp_pipette_and_press_button_106ep"
-ASSET_ID="$(basename "$DATA_REPO")"
-
-```bash
-setsid nohup env \
-  HF_LEROBOT_HOME="$PROJECT_ROOT" \
-  HF_DATASETS_CACHE=.hf_datasets_cache \
-  HF_HUB_OFFLINE=1 \
-  CUDA_VISIBLE_DEVICES=0,1,2,3 \
-  XLA_PYTHON_CLIENT_PREALLOCATE=false \
-  env/.venv/bin/python scripts/train.py \
-    pi0_xhand_tactile_structured_dual_ae_arm_future_hand_mask \
-    --exp-name structured_dual_ae_arm_future_hand_mask_106ep_20k \
-    --data.repo-id "$DATA_REPO" \
-    --data.assets.asset-id "$ASSET_ID" \
-    --data.assets.assets-dir assets/pi0_xhand_tactile_structured_dual_ae \
-    --num-train-steps 20000 \
-    --batch-size 8 \
-    --fsdp-devices 4 \
-    --num-workers 2 \
-    --save-interval 5000 \
-    --keep-period 5000 \
-    --no-wandb-enabled \
-    --overwrite \
-    --weight-loader.params-path checkpoints/pi0_base/params \
-  > logs/structured_dual_ae_arm_future_hand_mask_106ep_20k.log 2>&1 &
-```
-
-### F. structured raw dual AE 5x120x3
-
-raw 点阵触觉需要单独归一化，不要复用 5x3 的 assets。
-
-```bash
-setsid nohup env \
-  HF_LEROBOT_HOME="$PROJECT_ROOT" \
-  HF_DATASETS_CACHE=.hf_datasets_cache \
-  HF_HUB_OFFLINE=1 \
-  CUDA_VISIBLE_DEVICES=0,1,2,3 \
-  XLA_PYTHON_CLIENT_PREALLOCATE=false \
-  env/.venv/bin/python scripts/train.py \
-    pi0_xhand_tactile_structured_raw_dual_ae \
-    --exp-name pi0_xhand_tactile_structured_raw_dual_ae_106ep_20k \
-    --data.repo-id "$DATA_REPO" \
-    --data.assets.asset-id "$ASSET_ID" \
-    --num-train-steps 20000 \
-    --batch-size 8 \
-    --fsdp-devices 4 \
-    --num-workers 2 \
-    --save-interval 5000 \
-    --keep-period 5000 \
-    --no-wandb-enabled \
-    --overwrite \
-    --weight-loader.params-path checkpoints/pi0_base/params \
-  > logs/pi0_xhand_tactile_structured_raw_dual_ae_106ep_20k.log 2>&1 &
-```
-
-### G. Patch-informed raw dual AE
-
-保持每根手指 1 个外部 token，但在每根手指内部先按 5 个 patch 聚合点阵力，再融合成 finger token。复用 raw tactile 的 assets。
-
-```bash
-setsid nohup env \
-  HF_LEROBOT_HOME="$PROJECT_ROOT" \
-  HF_DATASETS_CACHE=.hf_datasets_cache \
-  HF_HUB_OFFLINE=1 \
-  CUDA_VISIBLE_DEVICES=0,1,2,3 \
-  XLA_PYTHON_CLIENT_PREALLOCATE=false \
-  env/.venv/bin/python scripts/train.py \
-    pi0_xhand_dual_patch_f4_h16 \
-    --exp-name pi0_xhand_dual_patch_f4_h16 \
-    --data.repo-id "$DATA_REPO" \
-    --data.assets.asset-id "$ASSET_ID" \
-    --data.assets.assets-dir assets/pi0_xhand_tactile_structured_raw_dual_ae \
-    --num-train-steps 30000 \
-    --batch-size 8 \
-    --fsdp-devices 1 \
-    --num-workers 2 \
-    --save-interval 5000 \
-    --keep-period 5000 \
-    --no-wandb-enabled \
-    --overwrite \
-    --weight-loader.params-path checkpoints/pi0_base/params \
-  > logs/pi0_xhand_dual_patch_f4_h16.log 2>&1 &
-```
-
-### H. Patch-informed cached VLM async AE
-
-异步训练版本：action horizon=16，history tactile=10 tokens，future tactile=4 segments，对应部署里 cached VLM + fresh tactile 更新 AE 的主线。
-
-```bash
-setsid nohup env \
-  HF_LEROBOT_HOME="$PROJECT_ROOT" \
-  HF_DATASETS_CACHE=.hf_datasets_cache \
-  HF_HUB_OFFLINE=1 \
-  CUDA_VISIBLE_DEVICES=0,1,2,3 \
-  XLA_PYTHON_CLIENT_PREALLOCATE=false \
-  env/.venv/bin/python scripts/train.py \
-    pi0_xhand_dual_patch_f4_h16_async \
-    --exp-name pi0_xhand_dual_patch_f4_h16_async \
-    --data.repo-id "$DATA_REPO" \
-    --data.assets.asset-id "$ASSET_ID" \
-    --data.assets.assets-dir assets/pi0_xhand_tactile_structured_raw_dual_ae \
-    --num-train-steps 50000 \
-    --batch-size 8 \
-    --fsdp-devices 1 \
-    --num-workers 2 \
-    --save-interval 10000 \
-    --keep-period 10000 \
-    --no-wandb-enabled \
-    --overwrite \
-    --weight-loader.params-path checkpoints/pi0_base/params \
-  > logs/pi0_xhand_dual_patch_f4_h16_async.log 2>&1 &
-```
-
-# config总结：
-当前主线只看 dual-AE。single-AE / flow / mask / refiner 旧配置先放到历史归档，不作为当前实验主线。
-
-## Canonical dual-AE configs
-
-共同设置：
-
-- action horizon = 16
-- history tactile = 10 tokens，即 5 个历史摘要 finger tokens + 5 个当前帧 finger tokens
-- tokenizer 外部输出都是每个 tactile step 5 个 finger tokens
-- patch-informed 复用 `assets/pi0_xhand_tactile_structured_raw_dual_ae`
-
-| config | tokenizer | future segments | future tokens | async training | fast offsets |
-|---|---|---:|---:|---|---|
-| `pi0_xhand_dual_patch_f4_h16` | patch-informed | 4 | 20 | 否 | - |
-| `pi0_xhand_dual_patch_f4_h16_async` | patch-informed | 4 | 20 | 是 | 4,8,12 |
-| `pi0_xhand_dual_patch_f8_h16` | patch-informed | 8 | 40 | 否 | - |
-| `pi0_xhand_dual_patch_f8_h16_async` | patch-informed | 8 | 40 | 是 | 2,4,6,8,10 |
-
-baseline:
-
-- `pi0_xhand_full_finetune_h16`：原始 pi0，action horizon = 16，不输入 tactile。
-
-旧配置仍保留在代码中，主要用于复现实验和读取旧 checkpoint，不建议新实验继续优先使用。
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+/workspace/mnt/sqzhang26/FactileLDM/env/.venv/bin/python scripts/train.py \
+  pi05_tactile_direct16 \
+  --exp-name pi05_tactile_direct16_press_0829 \
+  --data.repo-id "$DATA_REPO" \
+  --data.assets.asset-id "$ASSET_ID" \
+  --data.assets.assets-dir "$ASSET_DIR" \
+  --train-filter-path "$TRAIN_SPLIT" \
+  --weight-loader.encoder-params-path "$PATCH_ENCODER_PARAMS" \
+  --num-train-steps 30000 \
+  --batch-size 4 \
+  --fsdp-devices 1 \
+  --num-workers 0 \
+  --lr-schedule.warmup-steps 1000 \
+  --lr-schedule.peak-lr 2.5e-5 \
+  --lr-schedule.decay-steps 30000 \
+  --lr-schedule.decay-lr 2.5e-6 \
+  --save-interval 2500 \
+  --keep-period 5000 \
+  --eval-interval 1000 \
+  --eval-num-batches 2 \
+  --eval-batch-size 4 \
+  --eval-num-workers 0 \
+  --eval-repo-id "$DATA_REPO" \
+  --eval-asset-id "$ASSET_ID" \
+  --eval-assets-dir "$ASSET_DIR" \
+  --eval-filter-path "$VAL_SPLIT" \
+  --no-wandb-enabled \
+  > logs/pi05_tactile_direct16_press_0829.log 2>&1 &
 
 
 ## 历史内容归档
@@ -348,19 +173,6 @@ DATA_REPO="data/grasp_pipette_and_press_button_106ep"
 ASSET_ID="$(basename "$DATA_REPO")"
 ```
 
-# 合并数据集
-python scripts/merge_lerobot_v21_datasets.py \
-  --sources \
-    /workspace/mnt/sqzhang26/FactileLDM/data/47ep \
-    /workspace/mnt/sqzhang26/FactileLDM/data/grasp_pipette_and_press_button_0616_59ep \
-  --output /workspace/mnt/sqzhang26/FactileLDM/data/grasp_pipette_and_press_button_106ep \
-  --overwrite
-python scripts/merge_lerobot_v21_datasets.py \
-  --sources \
-    /workspace/mnt/sqzhang26/FactileLDM/data/task12345 \
-    /workspace/mnt/sqzhang26/FactileLDM/data/0706_grasp_bottle \
-  --output /workspace/mnt/sqzhang26/FactileLDM/data/task12345-2 \
-  --overwrite
 
 # 计算光流图像
 
@@ -463,33 +275,16 @@ aws s3 cp s3://sqzhang26-2/path/to/folder ./folder \
   --endpoint-url https://eos-huhehaote-1.cmecloud.cn
 
 #上载整个目录
-aws s3 cp /Users/babyna/FactileLDM/data/press_button_4_times/press_button_1/meta s3://sqzhang26-2/meta_1  \
+aws s3 cp /Users/babyna/FactileLDM/data/press_button_4_times s3://sqzhang26-2/press_button_4_times  \
   --recursive \
   --endpoint-url https://eos-huhehaote-1.cmecloud.cn
 
-AWS_REQUEST_CHECKSUM_CALCULATION=when_required \
-AWS_RESPONSE_CHECKSUM_VALIDATION=when_required \
-aws s3 cp \
-"/Users/babyna/FactileLDM/data/press_button_4_times/press_button_0/meta" \
-"s3://sqzhang26-2/meta_0/" \
---recursive \
---endpoint-url "https://eos-huhehaote-1.cmecloud.cn"
 
 # 大文件上传  mac支持\
-s3cmd put /Users/babyna/FactileLDM/data/press_button_4_times/press_button_2.tar.gz  \
-  s3://sqzhang26-2/press_button_2.tar.gz
+s3cmd put //Users/babyna/FactileLDM/data/press_button_4_times.zip  \
+  s3://sqzhang26-2/press_button_4_times.zip
 
 
-
-# 划分验证集
-cd /workspace/mnt/sqzhang26/FactileLDM
-
-env/.venv/bin/python scripts/create_task_stratified_episode_split.py \
-  --repo-id data/taskall-2 \
-  --output-dir outputs/episode_splits/taskall-2_recursive_revision \
-  --val-ratio 0.10 \
-  --min-val-per-task 3 \
-  --seed 42
 
 # 验证encoder
 cd /workspace/mnt/sqzhang26/FactileLDM
