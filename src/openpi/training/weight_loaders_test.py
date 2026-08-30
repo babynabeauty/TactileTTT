@@ -3,7 +3,7 @@ import numpy as np
 from openpi.training import weight_loaders
 
 
-def test_augment_with_latent_flow_head_weights_maps_pi05_heads():
+def test_augment_with_latent_flow_head_weights_maps_pi05_student_heads_only():
     loaded = {
         "action_in_proj": {
             "kernel": np.arange(6, dtype=np.float32).reshape(2, 3),
@@ -41,15 +41,22 @@ def test_augment_with_latent_flow_head_weights_maps_pi05_heads():
 
     augmented = weight_loaders._augment_with_latent_flow_head_weights(loaded, reference)
 
-    for source, targets in {
-        "action_in_proj": ("action_in_proj_student", "action_in_proj_teacher"),
-        "action_out_proj": ("action_out_proj_student", "action_out_proj_teacher"),
-        "time_mlp_in": ("student_time_mlp_in", "teacher_time_mlp_in"),
-        "time_mlp_out": ("student_time_mlp_out", "teacher_time_mlp_out"),
+    for source, target in {
+        "action_in_proj": "action_in_proj_student",
+        "action_out_proj": "action_out_proj_student",
+        "time_mlp_in": "student_time_mlp_in",
+        "time_mlp_out": "student_time_mlp_out",
     }.items():
-        for target in targets:
-            for leaf, expected in loaded[source].items():
-                assert np.array_equal(augmented[target][leaf], expected)
+        for leaf, expected in loaded[source].items():
+            assert np.array_equal(augmented[target][leaf], expected)
+
+    for target in (
+        "action_in_proj_teacher",
+        "action_out_proj_teacher",
+        "teacher_time_mlp_in",
+        "teacher_time_mlp_out",
+    ):
+        assert target not in augmented
 
 
 def test_augment_with_latent_flow_head_weights_skips_shape_mismatch():

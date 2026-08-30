@@ -133,10 +133,9 @@ class Pi0WithFutureTactileEncoderWeightLoader(WeightLoader):
 class Pi0WithPatchTactileEncoderWeightLoader(WeightLoader):
     """Loads pi0 base weights plus a pretrained patch-informed tactile encoder.
 
-    The stage-1 checkpoint stores the encoder under `patch_encoder`. The dual-AE
-    policy has separate student/teacher tactile encoders, so the same pretrained
-    tensors are copied into both `student_force_tokenizer` and
-    `teacher_force_tokenizer` when shapes match.
+    The stage-1 checkpoint stores the encoder under `patch_encoder`. It is
+    loaded into the deployment student's tactile tokenizer only; this loader
+    does not introduce or initialize a teacher branch.
     """
 
     pi0_params_path: str = "checkpoints/pi0_base/params"
@@ -163,25 +162,24 @@ class Pi0WithPatchTactileEncoderWeightLoader(WeightLoader):
         for key, value in flat_encoder.items():
             if not key or key[0] != "patch_encoder":
                 continue
-            for target_root in ("student_force_tokenizer", "teacher_force_tokenizer"):
-                mapped_key = (target_root, *key[1:])
-                if mapped_key not in flat_ref:
-                    continue
-                if (
-                    hasattr(value, "shape")
-                    and hasattr(flat_ref[mapped_key], "shape")
-                    and value.shape != flat_ref[mapped_key].shape
-                ):
-                    logger.warning(
-                        "Skipping patch tactile encoder param %s -> %s due to shape mismatch: %s vs %s",
-                        _path_string(key),
-                        _path_string(mapped_key),
-                        value.shape,
-                        flat_ref[mapped_key].shape,
-                    )
-                    continue
-                flat_merged[mapped_key] = value.astype(flat_ref[mapped_key].dtype)
-                copied += 1
+            mapped_key = ("student_force_tokenizer", *key[1:])
+            if mapped_key not in flat_ref:
+                continue
+            if (
+                hasattr(value, "shape")
+                and hasattr(flat_ref[mapped_key], "shape")
+                and value.shape != flat_ref[mapped_key].shape
+            ):
+                logger.warning(
+                    "Skipping patch tactile encoder param %s -> %s due to shape mismatch: %s vs %s",
+                    _path_string(key),
+                    _path_string(mapped_key),
+                    value.shape,
+                    flat_ref[mapped_key].shape,
+                )
+                continue
+            flat_merged[mapped_key] = value.astype(flat_ref[mapped_key].dtype)
+            copied += 1
 
         logger.info("Loaded %d patch tactile encoder tensors from %s.", copied, self.encoder_params_path)
         return _unflatten_params(flat_merged)
@@ -313,47 +311,47 @@ def _augment_with_mor_action_expert_weights(loaded_params: at.Params, params: at
 def _augment_with_latent_flow_head_weights(loaded_params: at.Params, params: at.Params) -> at.Params:
     """Initializes renamed latent-flow policy heads from a base pi0/pi0.5 checkpoint.
 
-    ``Pi0LatentFlow`` keeps separate student/teacher projection names, while a
-    released pi0/pi0.5 checkpoint stores the same policy heads without those
-    suffixes.  Without this mapping the active student action input/output and
-    time-conditioning layers silently retain random initialization.
+    A released pi0/pi0.5 checkpoint stores its policy heads without the
+    ``student`` suffix used by ``Pi0LatentFlow``.  Only the deployment student
+    is initialized here: teacher parameters, when present in a future-tactile
+    experiment, must be initialized by that experiment explicitly.
     """
     flat_loaded = _flatten_params(loaded_params)
     flat_ref = _flatten_params(params)
     augmented = dict(flat_loaded)
 
     root_mapping = {
-        "action_in_proj": ("action_in_proj_student", "action_in_proj_teacher"),
-        "action_out_proj": ("action_out_proj_student", "action_out_proj_teacher"),
-        "time_mlp_in": ("student_time_mlp_in", "teacher_time_mlp_in"),
-        "time_mlp_out": ("student_time_mlp_out", "teacher_time_mlp_out"),
-        "state_proj": ("state_proj_student", "state_proj_teacher"),
-        "action_time_mlp_in": ("student_time_mlp_in", "teacher_time_mlp_in"),
-        "action_time_mlp_out": ("student_time_mlp_out", "teacher_time_mlp_out"),
+        "action_in_proj": "action_in_proj_student",
+        "action_out_proj": "action_out_proj_student",
+        "time_mlp_in": "student_time_mlp_in",
+        "time_mlp_out": "student_time_mlp_out",
+        "state_proj": "state_proj_student",
+        "action_time_mlp_in": "student_time_mlp_in",
+        "action_time_mlp_out": "student_time_mlp_out",
     }
 
     copied = 0
     for key, value in flat_loaded.items():
         if not key or key[0] not in root_mapping:
             continue
-        for target_root in root_mapping[key[0]]:
-            mapped_key = (target_root, *key[1:])
-            if mapped_key in augmented or mapped_key not in flat_ref:
-                continue
-            reference = flat_ref[mapped_key]
-            if hasattr(value, "shape") and hasattr(reference, "shape") and value.shape != reference.shape:
-                logger.warning(
-                    "Skipping base policy head %s -> %s due to shape mismatch: %s vs %s",
-                    _path_string(key),
-                    _path_string(mapped_key),
-                    value.shape,
-                    reference.shape,
-                )
-                continue
-            augmented[mapped_key] = value.astype(reference.dtype) if value.dtype != reference.dtype else value
-            copied += 1
+        target_root = root_mapping[key[0]]
+        mapped_key = (target_root, *key[1:])
+        if mapped_key in augmented or mapped_key not in flat_ref:
+            continue
+        reference = flat_ref[mapped_key]
+        if hasattr(value, "shape") and hasattr(reference, "shape") and value.shape != reference.shape:
+            logger.warning(
+                "Skipping base policy head %s -> %s due to shape mismatch: %s vs %s",
+                _path_string(key),
+                _path_string(mapped_key),
+                value.shape,
+                reference.shape,
+            )
+            continue
+        augmented[mapped_key] = value.astype(reference.dtype) if value.dtype != reference.dtype else value
+        copied += 1
 
     if copied > 0:
-        logger.info("Mapped %d base policy-head tensors into latent-flow student/teacher heads.", copied)
+        logger.info("Mapped %d base policy-head tensors into the latent-flow student head.", copied)
 
     return _unflatten_params(augmented)
