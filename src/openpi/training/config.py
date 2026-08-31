@@ -74,6 +74,19 @@ def freeze_image_encoder_and_vlm_base_train_vlm_lora_action_experts() -> Filter:
     )
 
 
+def freeze_except_tactile_ttt() -> Filter:
+    """Freeze every parameter except the slow parameters of TactileTTT.
+
+    The shared ``tactile_ttt`` path fragment covers both the layer-wise Linen
+    modules inside the action expert and the learned per-layer fast-state
+    initialization tensors owned by ``Pi0LatentFlow``.
+    """
+    return nnx.All(
+        nnx.Param,
+        nnx.Not(nnx_utils.PathRegex(".*tactile_ttt.*")),
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class AssetsConfig:
     """Determines the location of assets (e.g., norm stats) that will be used to set up the data pipeline.
@@ -2321,6 +2334,13 @@ def _pi05_tactile_ttt_v1_config(source_name: str, new_name: str) -> TrainConfig:
 
 _CONFIGS.extend(
     [
+        dataclasses.replace(
+            _pi05_tactile_ttt_v1_config(
+                "pi0_xhand_tactile_structured_patch_informed_raw_dual_ae",
+                "pi05_tactile_ttt_v1_warmup",
+            ),
+            freeze_filter=freeze_except_tactile_ttt(),
+        ),
         _pi05_tactile_ttt_v1_config(
             "pi0_xhand_tactile_structured_patch_informed_raw_dual_ae",
             "pi05_tactile_ttt_v1",

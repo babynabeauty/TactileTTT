@@ -59,24 +59,61 @@ PATCH_ENCODER_PARAMS=/workspace/mnt/sqzhang26/FactileLDM/checkpoints/xhand_patch
 
 mkdir -p logs
 
-## TactileTTT
+## TactileTTT v1：阶段一，仅 warm-up TTT 参数
 setsid nohup env CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 /workspace/mnt/sqzhang26/FactileLDM/env/.venv/bin/python scripts/train.py \
-  pi05_tactile_ttt_v1 \
-  --exp-name pi05_tactile_ttt_v1_press_0831 \
+  pi05_tactile_ttt_v1_warmup \
+  --exp-name pi05_tactile_ttt_v1_warmup_press_0831 \
   --data.repo-id "$DATA_REPO" \
   --data.assets.asset-id "$ASSET_ID" \
   --data.assets.assets-dir "$ASSET_DIR" \
   --train-filter-path "$TRAIN_SPLIT" \
   --weight-loader.encoder-params-path "$PATCH_ENCODER_PARAMS" \
-  --num-train-steps 1000 \
+  --num-train-steps 250 \
   --batch-size 8 \
   --fsdp-devices 4 \
   --num-workers 0 \
-  --lr-schedule.warmup-steps 100 \
+  --lr-schedule.warmup-steps 25 \
   --lr-schedule.peak-lr 2.5e-5 \
-  --lr-schedule.decay-steps 2000 \
+  --lr-schedule.decay-steps 250 \
+  --lr-schedule.decay-lr 2.5e-6 \
+  --save-interval 125 \
+  --keep-period 125 \
+  --eval-interval 125 \
+  --eval-num-batches 2 \
+  --eval-batch-size 8 \
+  --eval-num-workers 0 \
+  --eval-repo-id "$DATA_REPO" \
+  --eval-asset-id "$ASSET_ID" \
+  --eval-assets-dir "$ASSET_DIR" \
+  --eval-filter-path "$VAL_SPLIT" \
+  --no-wandb-enabled \
+  > logs/pi05_tactile_ttt_v1_warmup_press_0831.log 2>&1 &
+
+## TactileTTT v1：阶段二，加载 warm-up 参数后联合训练
+# 当前训练循环的250-step run最终保存目录标号为249；请以实际日志为准。不要使用 --resume。
+FINAL_STEP=249
+WARMUP_PARAMS="$PROJECT_ROOT/checkpoints/pi05_tactile_ttt_v1_warmup/pi05_tactile_ttt_v1_warmup_press_0831/$FINAL_STEP/params"
+
+setsid nohup env CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+/workspace/mnt/sqzhang26/FactileLDM/env/.venv/bin/python scripts/train.py \
+  pi05_tactile_ttt_v1 \
+  --exp-name pi05_tactile_ttt_v1_joint_press_0831 \
+  --data.repo-id "$DATA_REPO" \
+  --data.assets.asset-id "$ASSET_ID" \
+  --data.assets.assets-dir "$ASSET_DIR" \
+  --train-filter-path "$TRAIN_SPLIT" \
+  --weight-loader.pi0-params-path "$WARMUP_PARAMS" \
+  --weight-loader.encoder-params-path "$PATCH_ENCODER_PARAMS" \
+  --num-train-steps 750 \
+  --batch-size 8 \
+  --fsdp-devices 4 \
+  --num-workers 0 \
+  --lr-schedule.warmup-steps 75 \
+  --lr-schedule.peak-lr 2.5e-5 \
+  --lr-schedule.decay-steps 750 \
   --lr-schedule.decay-lr 2.5e-6 \
   --save-interval 250 \
   --keep-period 250 \
@@ -89,7 +126,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false \
   --eval-assets-dir "$ASSET_DIR" \
   --eval-filter-path "$VAL_SPLIT" \
   --no-wandb-enabled \
-  > logs/pi05_tactile_ttt_v1_press_0831.log 2>&1 &
+  > logs/pi05_tactile_ttt_v1_joint_press_0831.log 2>&1 &
 
 ### pi05
   setsid nohup env \
@@ -156,81 +193,6 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false \
   --eval-filter-path "$VAL_SPLIT" \
   --no-wandb-enabled \
   > logs/pi05_tactile_direct16_press_0829.log 2>&1 &
-
-
-## 历史内容归档
-
-下面是之前的命令和杂项记录，保留备用；日常跑实验优先复制上面的推荐命令。
-
-```bash
-cd /workspace/mnt/sqzhang26/FactileLDM
-source env/.venv/bin/activate
-export PROJECT_ROOT=/workspace/mnt/sqzhang26/FactileLDM
-export HF_LEROBOT_HOME="$PROJECT_ROOT"
-export HF_HUB_OFFLINE=1
-export HF_DATASETS_CACHE=.hf_datasets_cache
-DATA_REPO="data/grasp_pipette_and_press_button_106ep"
-ASSET_ID="$(basename "$DATA_REPO")"
-```
-
-
-# 计算光流图像
-
-```bash
-    CUDA_VISIBLE_DEVICES=0 \
-env/.venv/bin/python scripts/compute_lerobot_future_flow_video.py \
-  --repo-id data/grasp_pipette_and_press_button_0616_59ep_flow \
-  --output-dir ./flow_videos \
-  --future-step 32 \
-  --overwrite
-后台挂起
-  setsid nohup env CUDA_VISIBLE_DEVICES=4 \
-  /data/workspace/zhangshiqi/forceWAM/env/.venv/bin/python \
-  /data/workspace/zhangshiqi/forceWAM/scripts/compute_lerobot_future_flow_video.py \
-  --repo-id /data/workspace/zhangshiqi/forceWAM/grasp_pipette_and_press_button_26ep \
-  --output-dir /data/workspace/zhangshiqi/forceWAM/flow_videos \
-  --future-step 32 \
-  > flow_videos/compute_future_flow.log 2>&1 &
-```
-
-# 将光流视频添加到 LeRobot 数据集
-```bash
-  env/.venv/bin/python scripts/add_flow_videos_to_lerobot.py \
-  --repo-id grasp_pipette_and_press_0614_7ep \
-  --flow-videos-dir flow_videos/videos \
-  --map \
-    cam_front=observation.future_flow.cam_front \
-    cam_right=observation.future_flow.cam_right \
-  --overwrite
-```
-
-
-# 计算3D偏移点
-```bash
-DATA=grasp_pipette_and_press_button
-OUT=outputs/front_scene_flow_grasp_pipette_sam3_tracked_npz
-
-mkdir -p "$OUT"
-for EP in $(seq 0 48); do
-  echo "===== episode ${EP} ====="
-  CUDA_VISIBLE_DEVICES=4 env/.venv/bin/python scripts/visualize_front_scene_flow_episode_sam3_tracked_object.py \
-    --repo-id "$DATA" \
-    --episode-index "$EP" \
-    --future-step 32 \
-    --stride 3 \
-    --max-depth 2.5 \
-    --pair-step 1 \
-    --overlay-step 1000000 \
-    --sam3-checkpoint /data/shared_workspace/zhangshiqi/hf/SAM/sam3/sam3.pt \
-    --sam3-device cuda \
-    --sam3-confidence-threshold 0.35 \
-    --object-points '238,215;242,250;246,275' \
-    --object-negative-points '249,326;259,361;248,301' \
-    --save-flow-npz \
-    --skip-ply \
-    --output-dir "$OUT"
-done 2>&1 | tee "$OUT/batch.log"
-```
 
 
 

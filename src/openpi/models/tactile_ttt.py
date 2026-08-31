@@ -84,6 +84,11 @@ class LayerwiseTactileTTT(nn.Module):
         memory_hidden = jax.nn.gelu(jnp.einsum("bnd,bdh->bnh", queries, updated_w1) + updated_b1[:, None, :])
         memory = jnp.einsum("bnh,bhd->bnd", memory_hidden, updated_w2) + updated_b2[:, None, :]
         memory = nn.Dense(self.width, use_bias=False, name="output_proj")(memory.astype(tokens.dtype))
+        # Linen Dense keeps float32 parameters by default, so its result may be
+        # promoted back to float32 even when the activation is bfloat16.  The
+        # Transformer blocks are scanned and require the hidden-state carry to
+        # preserve its dtype exactly across every layer.
+        memory = memory.astype(tokens.dtype)
 
         residual_gate_raw = self.param(
             "residual_gate",
@@ -91,8 +96,8 @@ class LayerwiseTactileTTT(nn.Module):
             (self.width,),
         )
         residual_gate = jnp.tanh(residual_gate_raw).astype(tokens.dtype)
-        contribution = residual_gate[None, None, :] * memory
-        enhanced = tokens + contribution
+        contribution = (residual_gate[None, None, :] * memory).astype(tokens.dtype)
+        enhanced = (tokens + contribution).astype(tokens.dtype)
 
         def state_norm(state: TactileTTTState) -> jax.Array:
             squared = sum(

@@ -71,6 +71,18 @@ def test_vector_residual_gate_starts_near_point_zero_zero_one():
     assert np.allclose(stats["residual_gate"], np.tanh(0.001), atol=1e-7)
 
 
+def test_layerwise_tactile_ttt_preserves_bfloat16_transformer_carry_dtype():
+    module = _module()
+    state = _state(2)
+    tokens = jnp.ones((2, 21, 32), dtype=jnp.bfloat16)
+    write_gate = jnp.ones((2,), dtype=jnp.float32)
+    variables = module.init(jax.random.key(0), tokens, state, write_gate, jnp.ones((2,)))
+
+    enhanced, _, _ = module.apply(variables, tokens, state, write_gate, jnp.ones((2,)))
+
+    assert enhanced.dtype == tokens.dtype
+
+
 def test_contact_gate_separates_no_contact_and_contact():
     no_contact = jnp.zeros((1, 16, 5, 3), dtype=jnp.float32)
     at_threshold = no_contact.at[:, 7, 1, 0].set(4.3)
@@ -103,14 +115,14 @@ def test_gemma_action_expert_carries_one_fast_state_per_transformer_layer():
         tactile_ttt_memory_dim=8,
         tactile_ttt_mlp_dim=12,
     )
-    llm = nnx_bridge.ToNNX(gemma.Module(configs=[base_config, student_config], embed_dtype="float32", adarms=False))
+    llm = nnx_bridge.ToNNX(gemma.Module(configs=[base_config, student_config], embed_dtype="bfloat16", adarms=False))
     llm.lazy_init(rngs=nnx.Rngs(0), method="init", use_adarms=[False, False])
 
     batch_size = 2
     depth = student_config.depth
     state = tuple(jnp.broadcast_to(value[None, ...], (depth, *value.shape)) for value in _state(batch_size))
-    prefix = jnp.ones((batch_size, 3, base_config.width), dtype=jnp.float32)
-    student = jnp.ones((batch_size, 5, student_config.width), dtype=jnp.float32)
+    prefix = jnp.ones((batch_size, 3, base_config.width), dtype=jnp.bfloat16)
+    student = jnp.ones((batch_size, 5, student_config.width), dtype=jnp.bfloat16)
     positions = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32), (batch_size, 8))
     mask = jnp.ones((batch_size, 8, 8), dtype=jnp.bool_)
 
@@ -123,6 +135,7 @@ def test_gemma_action_expert_carries_one_fast_state_per_transformer_layer():
     )
 
     assert outputs[1].shape == student.shape
+    assert outputs[1].dtype == student.dtype
     assert [value.shape[0] for value in updated] == [depth] * 4
     assert stats["reconstruction"].shape == (depth, batch_size)
     assert not np.allclose(updated[0][0], updated[0][1])

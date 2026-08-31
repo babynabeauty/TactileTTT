@@ -52,6 +52,11 @@
 
     pi05_tactile_ttt_v1
 
+两阶段训练配置：
+
+    pi05_tactile_ttt_v1_warmup  # 只训练路径中包含tactile_ttt的参数
+    pi05_tactile_ttt_v1         # 加载warm-up params后联合训练
+
 结构：
 
     RGB + language + robot state → π0.5
@@ -333,6 +338,19 @@ TPE预训练配置属于PI0，原本使用z-score；接入π0.5后被切换为qu
     能够忽略或恢复无效按压
     随后成功拿取并放入盒子
 
+### 两阶段训练约定
+
+当前采用两个独立训练run：
+
+1. `pi05_tactile_ttt_v1_warmup`：冻结VLM、原Action Expert、TPE和action head，只用action outer loss训练TTT slow parameters与fast-state初始化参数；
+2. `pi05_tactile_ttt_v1`：从warm-up checkpoint的`params`初始化，重新创建optimizer，然后联合训练。
+
+阶段二禁止对阶段一目录使用`--resume`。warm-up optimizer只包含TTT参数，而joint optimizer需要覆盖全部解冻参数，两者opt-state树不兼容。阶段二应新建exp，并通过：
+
+    --weight-loader.pi0-params-path <warmup-checkpoint>/params
+
+加载模型参数。episode runtime fast state不会跨run保存；checkpoint保存并传递的是学习到的每层fast-state初始化参数。
+
 ## 12. 下一步执行顺序
 
 ### P0：服务器验证v1代码
@@ -346,12 +364,13 @@ TPE预训练配置属于PI0，原本使用z-score；接入π0.5后被切换为qu
 ### P1：小规模诊断训练
 
 1. 从π0.5基础权重重新开始，不从旧750 checkpoint继续正式训练；
-2. 重跑pi05_tactile_direct16；
-3. 再跑TactileTTT 250～500 steps；
-4. 检查contact gate是否有0～1变化；
-5. 检查residual gate是否离开0；
-6. 检查memory contribution是否非零；
-7. 确认无NaN和异常fast-weight增长后再完整训练。
+2. 运行TTT-only warm-up 250 sequence optimizer steps；
+3. 从warm-up params新开joint run，运行750 sequence optimizer steps；
+4. 重跑pi05_tactile_direct16；
+5. 检查contact gate是否有0～1变化；
+6. 检查residual gate是否离开0.001；
+7. 检查memory contribution是否非零；
+8. 确认无NaN和异常fast-weight增长后再完整训练。
 
 ### P2：正式验证
 
@@ -377,6 +396,7 @@ TPE预训练配置属于PI0，原本使用z-score；接入π0.5后被切换为qu
     src/openpi/models/tactile_ttt.py
     src/openpi/models/tactile_ttt_test.py
     src/openpi/training/config.py
+    src/openpi/training/config_tactile_ttt_test.py
 
 其中：
 
@@ -385,7 +405,9 @@ TPE预训练配置属于PI0，原本使用z-score；接入π0.5后被切换为qu
 - pi0_latent_flow.py：维护每层episode fast state，训练与部署按chunk携带，flow denoising只提交一次更新；
 - pi0_config.py、training/config.py：删除v0入口并注册pi05_tactile_ttt_v1；
 - tactile_ttt_test.py：覆盖状态写入、禁写mask、门控、residual gate与Gemma逐层集成；
-- readme_forceWAM.md：训练命令切换为v1。
+- training/config.py：另外注册TTT-only warm-up冻结规则和pi05_tactile_ttt_v1_warmup；
+- config_tactile_ttt_test.py：验证warm-up只训练TTT，joint配置解除warm-up冻结；
+- readme_forceWAM.md：训练命令切换为warm-up 250 steps + joint 750 steps。
 
 ## 14. 服务器信息
 
