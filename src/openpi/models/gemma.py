@@ -35,6 +35,8 @@ import jax
 import jax.numpy as jnp
 
 import openpi.models.lora as lora
+from openpi.models.tactile_ttt import LayerwiseTactileTTT
+from openpi.models.tactile_ttt import TactileTTTState
 import openpi.shared.array_typing as at
 import openpi.training.sharding as sharding
 
@@ -50,6 +52,10 @@ class Config:
     num_kv_heads: int
     head_dim: int
     lora_configs: dict[str, lora.LoRAConfig] = dataclasses.field(default_factory=dict)
+    tactile_ttt_memory_dim: int = 0
+    tactile_ttt_mlp_dim: int = 0
+    tactile_ttt_inner_lr: float = 0.1
+    tactile_ttt_residual_gate_init: float = 0.001
 
 
 Variant = Literal["dummy", "gemma_300m", "gemma_300m_lora", "gemma_2b", "gemma_2b_lora"]
@@ -313,7 +319,18 @@ class Block(nn.Module):
     dropout_bdims: tuple[int, ...] = ()
 
     @nn.compact
-    def __call__(self, xs, kv_cache, positions, attn_mask, adarms_cond, deterministic=True):  # noqa: FBT002
+    def __call__(
+        self,
+        xs,
+        kv_cache,
+        positions,
+        attn_mask,
+        adarms_cond,
+        tactile_ttt_state,
+        tactile_ttt_write_gate,
+        tactile_ttt_update_mask,
+        deterministic=True,  # noqa: FBT002
+    ):
         xs = sharding.activation_sharding_constraint(xs)
         drop = nn.Dropout(self.dropout, self.dropout_bdims) if self.dropout else lambda x, _: x
 
@@ -334,6 +351,32 @@ class Block(nn.Module):
         xs = [_gated_residual(x, y, gate) for x, y, gate in zip(xs, post_attn, gates, strict=True)]
         xs = sharding.activation_sharding_constraint(xs)
 
+        tactile_ttt_stats = {}
+        enabled_experts = [i for i, config in enumerate(self.configs) if config.tactile_ttt_memory_dim > 0]
+        if enabled_experts:
+            if len(enabled_experts) != 1:
+                raise ValueError("Layer-wise TactileTTT currently supports exactly one enabled expert.")
+            expert_index = enabled_experts[0]
+            config = self.configs[expert_index]
+            if xs[expert_index] is not None:
+                if tactile_ttt_state is None:
+                    raise ValueError("Layer-wise TactileTTT requires an explicit fast-weight state.")
+                enhanced, tactile_ttt_state, tactile_ttt_stats = LayerwiseTactileTTT(
+                    width=config.width,
+                    memory_dim=config.tactile_ttt_memory_dim,
+                    mlp_dim=config.tactile_ttt_mlp_dim,
+                    base_inner_lr=config.tactile_ttt_inner_lr,
+                    residual_gate_init=config.tactile_ttt_residual_gate_init,
+                    name="tactile_ttt",
+                )(
+                    xs[expert_index],
+                    tactile_ttt_state,
+                    tactile_ttt_write_gate,
+                    tactile_ttt_update_mask,
+                )
+                xs[expert_index] = enhanced
+                xs = sharding.activation_sharding_constraint(xs)
+
         out = []
         gates = []
         for i, (x, config) in enumerate(zip(xs, self.configs, strict=True)):
@@ -353,7 +396,7 @@ class Block(nn.Module):
         xs = [_gated_residual(x, y, gate) for x, y, gate in zip(xs, out, gates, strict=True)]
         xs = sharding.activation_sharding_constraint(xs)
 
-        return xs, (kv_cache, xs)
+        return xs, (kv_cache, xs, tactile_ttt_state, tactile_ttt_stats)
 
 
 ConcatKVCache: TypeAlias = tuple[at.Float[at.Array, "l b _t _k _h"], at.Float[at.Array, "l b _t _v _h"]]
@@ -388,7 +431,7 @@ class Module(nn.Module):
         block_cls = nn.remat(
             Block,
             prevent_cse=False,
-            static_argnums=(5,),  # 0=self, 6=deterministic
+            static_argnums=(8,),
             policy=jax.checkpoint_policies.nothing_saveable,
         )
         self.layers = nn.scan(
@@ -400,8 +443,11 @@ class Module(nn.Module):
                 nn.broadcast,
                 nn.broadcast,
                 nn.broadcast,
+                0,
                 nn.broadcast,
-            ),  # 0=kv_cache, 1=positions, 2=mask, 3=adarms_cond, 4=deterministic
+                nn.broadcast,
+                nn.broadcast,
+            ),
             length=self.configs[0].depth,
         )(
             configs=self.configs,
@@ -431,13 +477,52 @@ class Module(nn.Module):
         deterministic: bool = True,
         return_layer_index: int | None = None,
         return_layer_indices: Sequence[int] | None = None,
+        tactile_ttt_state: TactileTTTState | None = None,
+        tactile_ttt_write_gate: jax.Array | None = None,
+        tactile_ttt_update_mask: jax.Array | None = None,
     ) -> Any:
         embedded = jax.tree.map(lambda e: e.astype(self.embed_dtype), embedded)
         mask = jnp.asarray(mask)[:, None, :, :]
         if adarms_cond is None:
             adarms_cond = [None] * len(self.configs)
 
-        embedded, (kv_cache, layer_hiddens) = self.layers(embedded, kv_cache, positions, mask, adarms_cond, deterministic)   #每次迭代都会用到的固定输入 (broadcast): positions: 位置编码。 mask: 注意力掩码。 adarms_cond: 可选的条件输入。deterministic: 是否禁用 dropout 的标志。
+        ttt_enabled = any(config.tactile_ttt_memory_dim > 0 for config in self.configs)
+        state_was_supplied = tactile_ttt_state is not None
+        if state_was_supplied:
+            if tactile_ttt_write_gate is None:
+                raise ValueError("tactile_ttt_write_gate is required when a TTT state is supplied.")
+            if tactile_ttt_update_mask is None:
+                tactile_ttt_update_mask = jnp.ones_like(tactile_ttt_write_gate)
+        elif ttt_enabled and any(value is not None for value in embedded[1:]):
+            raise ValueError("The TactileTTT action expert requires a fast-weight state.")
+        else:
+            batch_size = next(value.shape[0] for value in embedded if value is not None)
+            if ttt_enabled:
+                config = next(config for config in self.configs if config.tactile_ttt_memory_dim > 0)
+                tactile_ttt_state = (
+                    jnp.zeros((config.depth, batch_size, config.tactile_ttt_memory_dim, config.tactile_ttt_mlp_dim)),
+                    jnp.zeros((config.depth, batch_size, config.tactile_ttt_mlp_dim)),
+                    jnp.zeros((config.depth, batch_size, config.tactile_ttt_mlp_dim, config.tactile_ttt_memory_dim)),
+                    jnp.zeros((config.depth, batch_size, config.tactile_ttt_memory_dim)),
+                )
+            else:
+                # A mapped empty leaf keeps the lifted scan signature uniform
+                # for ordinary Gemma models without allocating memory.
+                tactile_ttt_state = jnp.zeros((self.configs[0].depth, 0), dtype=jnp.float32)
+            tactile_ttt_write_gate = jnp.zeros((batch_size,), dtype=jnp.float32)
+            tactile_ttt_update_mask = jnp.zeros((batch_size,), dtype=jnp.float32)
+
+        embedded, (kv_cache, layer_hiddens, tactile_ttt_state, tactile_ttt_stats) = self.layers(
+            embedded,
+            kv_cache,
+            positions,
+            mask,
+            adarms_cond,
+            tactile_ttt_state,
+            tactile_ttt_write_gate,
+            tactile_ttt_update_mask,
+            deterministic,
+        )
 
         assert all(e.dtype == jnp.dtype(self.embed_dtype) for e in embedded if e is not None)
 
@@ -457,7 +542,10 @@ class Module(nn.Module):
                         f"got {requested_index}."
                     )
                 selected_layers.append([h[layer_index] if h is not None else None for h in layer_hiddens])
-            return (outputs, tuple(selected_layers)), kv_cache
+            result = ((outputs, tuple(selected_layers)), kv_cache)
+            if state_was_supplied:
+                return (*result, tactile_ttt_state, tactile_ttt_stats)
+            return result
 
         if return_layer_index is not None:
             layer_index = self.configs[0].depth - 1 if return_layer_index == -1 else return_layer_index
@@ -466,17 +554,36 @@ class Module(nn.Module):
                     f"return_layer_index must be in [0, {self.configs[0].depth - 1}] or -1, got {return_layer_index}."
                 )
             selected_hiddens = [h[layer_index] if h is not None else None for h in layer_hiddens]
-            return (outputs, selected_hiddens), kv_cache
+            result = ((outputs, selected_hiddens), kv_cache)
+            if state_was_supplied:
+                return (*result, tactile_ttt_state, tactile_ttt_stats)
+            return result
+        if state_was_supplied:
+            return outputs, kv_cache, tactile_ttt_state, tactile_ttt_stats
         return outputs, kv_cache
 
     def init(self, use_adarms: Sequence[bool]):
         """Convenience method for initializing all parameters, necessary due to the quirks of linen."""
         self.embed(jnp.zeros((1, 1), dtype=jnp.int32))
+        ttt_configs = [config for config in self.configs if config.tactile_ttt_memory_dim > 0]
+        tactile_ttt_state = None
+        tactile_ttt_write_gate = None
+        if ttt_configs:
+            config = ttt_configs[0]
+            tactile_ttt_state = (
+                jnp.zeros((config.depth, 1, config.tactile_ttt_memory_dim, config.tactile_ttt_mlp_dim)),
+                jnp.zeros((config.depth, 1, config.tactile_ttt_mlp_dim)),
+                jnp.zeros((config.depth, 1, config.tactile_ttt_mlp_dim, config.tactile_ttt_memory_dim)),
+                jnp.zeros((config.depth, 1, config.tactile_ttt_memory_dim)),
+            )
+            tactile_ttt_write_gate = jnp.ones((1,), dtype=jnp.float32)
         self(
             [jnp.zeros((1, 1, c.width)) for c in self.configs],
             jnp.zeros((1, len(self.configs)), dtype=jnp.int32),
             jnp.zeros((1, len(self.configs), len(self.configs)), dtype=bool),
             adarms_cond=[jnp.zeros((1, c.width)) if u else None for u, c in zip(use_adarms, self.configs, strict=True)],
+            tactile_ttt_state=tactile_ttt_state,
+            tactile_ttt_write_gate=tactile_ttt_write_gate,
         )
 
 

@@ -1,7 +1,7 @@
 # TactileTTT 项目交接文档
 
 用途：将本文件交给新的 Codex 对话，使其直接继续当前工作。  
-更新时间：2026-08-30  
+更新时间：2026-08-31
 本地仓库：/Users/babyna/TactileTTT  
 服务器仓库：/workspace/mnt/sqzhang26/TactileTTT
 
@@ -48,35 +48,37 @@
 
 ## 3. 当前模型设计
 
-第一版配置名：
+当前配置名：
 
-    pi05_tactile_ttt_v0
+    pi05_tactile_ttt_v1
 
 结构：
 
     RGB + language + robot state → π0.5
 
-    过去16帧 raw tactile [16,5,120,3]
-        → TPE
-        → 4个时间段 × 5个手指 = 20个write tokens
+    当前帧 raw tactile [1,5,120,3]
+        → TPE → 5个手指token → π0.5 Action Expert
 
-    当前帧 × 5个手指 = 5个current/query tokens
-        → 单个linear fast-weight TTT memory
-        → 历史增强的5个触觉tokens
-        → π0.5 Action Expert
+    Action Expert的每个Transformer block：
+        Attention → layer-specific TTT-MLP → FFN
+
+    每层fast state：W1,b1,W2,b2
+    K/V binding inner update：MLP(K; fast state)拟合V
+    Q读取更新后的fast state，并通过逐通道residual gate注入block
 
 已经确定：
 
 - 保留 Tactile Patch Encoder（TPE）；
-- 第一版只有一个 TactileTTT 模块，不在每个 Action Expert layer 后插入；
-- fast weight 是 256×256 矩阵；
+- TTT只插入Action Expert，不修改VLM分支；
+- 每个Action Expert Transformer block在attention后各有一个独立TTT-MLP；
+- fast state为两层256→256→256 MLP，并按layer、episode分别携带；
 - fast weight 每个 action chunk 更新一次；
 - action horizon H=16，训练与部署更新频率一致；
 - 一条 episode 内持续携带 fast weight，episode 开始时重置；
 - sequence training 中，一次slow-weight optimization对整条episode全部有效chunk loss求平均；
 - 不使用future tactile prediction；
 - 不使用双AE、teacher AE、future-flow和tactile refiner；
-- 第一版只验证TactileTTT，第二版再加入VisualTTT。
+- 当前只验证TactileTTT，后续版本再加入VisualTTT。
 
 关键配置：
 
@@ -84,29 +86,30 @@
     force_input_frames = 16
     tactile_history_offsets = (-15, ..., 0)
     tactile_ttt_memory_dim = 256
+    tactile_ttt_mlp_dim = 256
     tactile_ttt_inner_lr = 0.1
-    tactile_ttt_write_segments = 4
+    tactile_ttt_residual_gate_init = 0.001
     disable_future_tactile = True
 
 ## 4. Fast-weight读写
 
 代码：src/openpi/models/tactile_ttt.py
 
-写入：
+每个Action Expert block写入：
 
     K = key_proj(LN(write_tokens))
     V = value_proj(LN(write_tokens))
-    prediction = K W
-    inner loss = ||K W - V||²
-    W_t = W_{t-1} - inner_lr × contact_gate × grad_W(inner loss)
+    prediction = MLP(K; W1,b1,W2,b2)
+    inner loss = mean(||prediction - V||²)
+    fast_state_t = fast_state_{t-1} - inner_lr × contact_gate × grad(inner loss)
 
 读取：
 
     Q = query_proj(LN(current_tokens))
-    memory = output_proj(Q W_t)
-    enhanced = current_tokens + tanh(residual_gate) × memory
+    memory = output_proj(MLP(Q; fast_state_t))
+    enhanced = current_tokens + tanh(residual_gate[channel]) × memory
 
-residual_gate 是可训练的slow scalar parameter，初始化为0：
+residual_gate 是每层可训练的slow vector parameter，初始化为0.001：
 
 - tanh(residual_gate)接近0：策略几乎不读取TTT；
 - 非零：memory才会影响Action Expert。
@@ -127,7 +130,7 @@ residual_gate 是可训练的slow scalar parameter，初始化为0：
 
 ### TactileTTT
 
-    pi05_tactile_ttt_v0
+    pi05_tactile_ttt_v1
 
 使用episode sequence training，fast weight跨chunk累积。原训练同时受到触觉归一化和接触门控失效影响，需要修复后重跑。
 
@@ -147,7 +150,7 @@ Direct16：
 
 Direct16触觉预处理错误，因此不能由此得出“触觉没有帮助”。
 
-TactileTTT v0：
+已废弃的TactileTTT v0诊断结果：
 
     step 250: eval loss = 0.08161824
     step 500: eval loss = 0.07069663
@@ -162,7 +165,7 @@ Step 750：
     eval/tactile_ttt/fast_weight_norm = 0.88156766
     eval/tactile_ttt/reconstruction = 0.13886708
 
-结论：当前TTT v0明显差于视觉baseline，而且500到750基本不再改善。但实验有确定实现问题，只能说明当前实现失败，不能说明TactileTTT方向失败。
+结论：旧TTT v0明显差于视觉baseline，而且500到750基本不再改善。v0代码与配置入口已经删除，旧checkpoint不能用于v1续训。
 
 旧checkpoint仅用于诊断：
 
@@ -203,7 +206,7 @@ TPE预训练配置属于PI0，原本使用z-score；接入π0.5后被切换为qu
 
     pi05_tactile_current
     pi05_tactile_direct16
-    pi05_tactile_ttt_v0
+    pi05_tactile_ttt_v1
 
 训练和部署policy使用相同规则；视觉baseline不受影响。
 
@@ -222,7 +225,7 @@ TPE预训练配置属于PI0，原本使用z-score；接入π0.5后被切换为qu
 - 新增混合归一化单元测试；
 - Mac无法运行完整pytest，因为项目依赖强制安装CUDA版JAX；应在服务器运行目标测试。
 
-## 8. 已发现但尚未修复：接触门控
+## 8. 已完成：未归一化calc_force接触门控
 
 当前门控使用归一化raw taxel：
 
@@ -258,7 +261,7 @@ TPE预训练配置属于PI0，原本使用z-score；接入π0.5后被切换为qu
     score_t = max over past 16 frames and five fingers ||calc_force||₂
     gate_t = sigmoid((score_t - 4.3 N) / 0.5 N)
 
-下一步必须把未归一化calc_force [T,5,3]单独传入模型，仅供contact gate使用：
+当前已把未归一化calc_force [T,5,3]单独传入模型，仅供contact gate使用：
 
 - TPE继续读取z-score后的raw taxel；
 - contact gate读取未归一化calc force；
@@ -332,14 +335,13 @@ TPE预训练配置属于PI0，原本使用z-score；接入π0.5后被切换为qu
 
 ## 12. 下一步执行顺序
 
-### P0：继续改代码
+### P0：服务器验证v1代码
 
-1. 从原始state提取过去16帧未归一化calc_force [16,5,3]；
-2. 作为独立字段传过data transform和Observation；
-3. contact gate改用calc_force、threshold=4.3 N、temperature=0.5 N；
-4. 确保sequence training和deployment行为一致；
-5. 更新门控测试；
-6. 在服务器运行目标pytest和data-loader batch shape检查。
+1. 同步本地v1修改到服务器；
+2. 运行目标pytest和data-loader batch shape检查；
+3. 初始化模型并确认基础Action Expert权重加载、新增TTT参数随机初始化；
+4. 检查单个训练step能编译且无NaN/OOM；
+5. 不从旧v0 checkpoint续训。
 
 ### P1：小规模诊断训练
 
@@ -367,19 +369,23 @@ TPE预训练配置属于PI0，原本使用z-score；接入π0.5后被切换为qu
 
 修改文件：
 
+    TACTILE_TTT_HANDOFF.md
+    readme_forceWAM.md
+    src/openpi/models/gemma.py
+    src/openpi/models/pi0_config.py
     src/openpi/models/pi0_latent_flow.py
-    src/openpi/models/tactile_tokenizer_test.py
     src/openpi/models/tactile_ttt.py
-    src/openpi/policies/policy_config.py
+    src/openpi/models/tactile_ttt_test.py
     src/openpi/training/config.py
-    src/openpi/training/data_loader.py
-    src/openpi/transforms.py
 
 其中：
 
-- tactile_ttt.py、pi0_latent_flow.py：增加TTT诊断；
-- transforms.py、config.py、data_loader.py、policy_config.py：混合归一化；
-- tactile_tokenizer_test.py：增加混合归一化测试。
+- gemma.py：在每个Action Expert Transformer block的attention后插入layer-specific TTT-MLP；
+- tactile_ttt.py：实现两层fast MLP、K/V binding、Q读取、可学习inner LR和vector residual gate；
+- pi0_latent_flow.py：维护每层episode fast state，训练与部署按chunk携带，flow denoising只提交一次更新；
+- pi0_config.py、training/config.py：删除v0入口并注册pi05_tactile_ttt_v1；
+- tactile_ttt_test.py：覆盖状态写入、禁写mask、门控、residual gate与Gemma逐层集成；
+- readme_forceWAM.md：训练命令切换为v1。
 
 ## 14. 服务器信息
 
@@ -401,5 +407,4 @@ TPE预训练配置属于PI0，原本使用z-score；接入π0.5后被切换为qu
 
 请先完整阅读本文件，然后继续：
 
-> 在不提交代码的前提下，检查当前未提交diff，并实现未归一化calc_force接触门控。门控使用过去16帧五指最大合力，threshold=4.3 N，temperature=0.5 N；TPE仍使用z-score raw tactile。训练与部署行为必须一致。实现后做静态检查、目标测试设计和变更说明，不需要在本机跑完整训练。
-
+> 在不提交代码的前提下，验证pi05_tactile_ttt_v1逐层TTT-MLP实现。门控使用过去16帧五指未归一化calc_force最大合力，threshold=4.3 N，temperature=0.5 N；TPE仍使用z-score raw tactile。训练与部署每个action chunk只提交一次fast-state更新，不从旧v0 checkpoint续训。

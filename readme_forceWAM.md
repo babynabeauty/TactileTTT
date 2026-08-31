@@ -63,8 +63,8 @@ mkdir -p logs
 setsid nohup env CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 /workspace/mnt/sqzhang26/FactileLDM/env/.venv/bin/python scripts/train.py \
-  pi05_tactile_ttt_v0 \
-  --exp-name pi05_tactile_ttt_v0_press_0829 \
+  pi05_tactile_ttt_v1 \
+  --exp-name pi05_tactile_ttt_v1_press_0831 \
   --data.repo-id "$DATA_REPO" \
   --data.assets.asset-id "$ASSET_ID" \
   --data.assets.assets-dir "$ASSET_DIR" \
@@ -89,7 +89,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false \
   --eval-assets-dir "$ASSET_DIR" \
   --eval-filter-path "$VAL_SPLIT" \
   --no-wandb-enabled \
-  > logs/pi05_tactile_ttt_v0_press_0829.log 2>&1 &
+  > logs/pi05_tactile_ttt_v1_press_0831.log 2>&1 &
 
 ### pi05
   setsid nohup env \

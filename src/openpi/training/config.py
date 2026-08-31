@@ -2270,8 +2270,8 @@ _CONFIGS.extend(
 )
 
 
-def _pi05_tactile_ttt_v0_config(source_name: str, new_name: str) -> TrainConfig:
-    """Minimal Pi0.5 + patch TPE + one tactile fast-memory experiment."""
+def _pi05_tactile_ttt_v1_config(source_name: str, new_name: str) -> TrainConfig:
+    """Pi0.5 with RoboTTT-style layer-wise tactile fast-weight memory."""
     source = next(config for config in _CONFIGS if config.name == source_name)
     return dataclasses.replace(
         source,
@@ -2287,8 +2287,9 @@ def _pi05_tactile_ttt_v0_config(source_name: str, new_name: str) -> TrainConfig:
             disable_future_tactile=True,
             tactile_ttt_enabled=True,
             tactile_ttt_memory_dim=256,
+            tactile_ttt_mlp_dim=256,
             tactile_ttt_inner_lr=0.1,
-            tactile_ttt_write_segments=4,
+            tactile_ttt_residual_gate_init=0.001,
             tactile_ttt_contact_threshold=4.3,
             tactile_ttt_contact_temperature=0.5,
             use_future_flow=False,
@@ -2320,9 +2321,9 @@ def _pi05_tactile_ttt_v0_config(source_name: str, new_name: str) -> TrainConfig:
 
 _CONFIGS.extend(
     [
-        _pi05_tactile_ttt_v0_config(
+        _pi05_tactile_ttt_v1_config(
             "pi0_xhand_tactile_structured_patch_informed_raw_dual_ae",
-            "pi05_tactile_ttt_v0",
+            "pi05_tactile_ttt_v1",
         ),
     ]
 )

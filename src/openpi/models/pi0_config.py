@@ -272,8 +272,9 @@ class Pi0LatentFlowConfig(Pi0Config):
     direct_future_tactile_align: bool = False
     tactile_ttt_enabled: bool = False
     tactile_ttt_memory_dim: int = 256
+    tactile_ttt_mlp_dim: int = 256
     tactile_ttt_inner_lr: float = 0.1
-    tactile_ttt_write_segments: int = 4
+    tactile_ttt_residual_gate_init: float = 0.001
     tactile_ttt_contact_threshold: float = 4.3
     tactile_ttt_contact_temperature: float = 0.5
     future_tactile_align_layer: int = 12
@@ -398,13 +399,13 @@ class Pi0LatentFlowConfig(Pi0Config):
                 if not self.tactile_patch_informed_tokenizer:
                     raise ValueError("tactile_ttt_enabled requires tactile_patch_informed_tokenizer=True.")
                 if not self.disable_future_tactile:
-                    raise ValueError("The first TactileTTT model requires disable_future_tactile=True.")
+                    raise ValueError("TactileTTT requires disable_future_tactile=True.")
                 if self.force_input_frames != self.action_horizon:
                     raise ValueError("TactileTTT requires force_input_frames == action_horizon.")
-                if self.tactile_ttt_write_segments * self.future_steps_per_segment != self.force_input_frames:
-                    raise ValueError("TactileTTT write segments must exactly cover force_input_frames.")
-                if self.tactile_ttt_memory_dim <= 0 or self.tactile_ttt_inner_lr <= 0:
-                    raise ValueError("TactileTTT memory_dim and inner_lr must be positive.")
+                if self.tactile_ttt_memory_dim <= 0 or self.tactile_ttt_mlp_dim <= 0:
+                    raise ValueError("TactileTTT memory_dim and mlp_dim must be positive.")
+                if self.tactile_ttt_inner_lr <= 0:
+                    raise ValueError("TactileTTT inner_lr must be positive.")
                 if self.tactile_ttt_contact_temperature <= 0:
                     raise ValueError("TactileTTT contact temperature must be positive.")
                 if self.cached_vlm_async_ae_enabled or self.async_tactile_refiner_enabled:
