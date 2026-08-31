@@ -636,7 +636,11 @@ def main(config: _config.TrainConfig):
             infos = []
         batch = next(data_iter)
 
-        completed_step = int(jax.device_get(train_state.step))
+        # The Python loop index already tracks the completed optimizer step.
+        # Reading train_state.step back from the device here would force a
+        # host/device synchronization on every iteration and break JAX's
+        # asynchronous dispatch/data-loading overlap.
+        completed_step = step + 1
         should_eval = (
             config.eval_interval > 0
             and completed_step > start_step

@@ -2327,7 +2327,9 @@ def _pi05_tactile_ttt_v1_config(source_name: str, new_name: str) -> TrainConfig:
             encoder_params_path=None,
         ),
         batch_size=1,
-        num_workers=0,
+        # Episode-sequence TTT batches require substantial video decoding.
+        # Keep workers enabled by default so CPU loading overlaps GPU compute.
+        num_workers=2,
         ema_decay=None,
     )
 

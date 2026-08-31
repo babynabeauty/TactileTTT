@@ -16,7 +16,7 @@ PYTHON_BIN="${PYTHON_BIN:-/workspace/mnt/sqzhang26/FactileLDM/env/.venv/bin/pyth
 GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
 FSDP_DEVICES="${FSDP_DEVICES:-4}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
-NUM_WORKERS="${NUM_WORKERS:-0}"
+NUM_WORKERS="${NUM_WORKERS:-2}"
 
 DATA_REPO="${DATA_REPO:-data/press_button_4_times}"
 ASSET_ID="${ASSET_ID:-press_button_4_times}"
