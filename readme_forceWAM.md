@@ -59,61 +59,45 @@ PATCH_ENCODER_PARAMS=/workspace/mnt/sqzhang26/FactileLDM/checkpoints/xhand_patch
 
 mkdir -p logs
 
-## TactileTTT v1：阶段一，仅 warm-up TTT 参数
-setsid nohup env CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-XLA_PYTHON_CLIENT_PREALLOCATE=false \
-/workspace/mnt/sqzhang26/FactileLDM/env/.venv/bin/python scripts/train.py \
-  pi05_tactile_ttt_v1_warmup \
-  --exp-name pi05_tactile_ttt_v1_warmup_press_0831 \
-  --data.repo-id "$DATA_REPO" \
-  --data.assets.asset-id "$ASSET_ID" \
-  --data.assets.assets-dir "$ASSET_DIR" \
-  --train-filter-path "$TRAIN_SPLIT" \
-  --weight-loader.encoder-params-path "$PATCH_ENCODER_PARAMS" \
-  --num-train-steps 250 \
-  --batch-size 8 \
-  --fsdp-devices 4 \
-  --num-workers 0 \
-  --lr-schedule.warmup-steps 25 \
-  --lr-schedule.peak-lr 2.5e-5 \
-  --lr-schedule.decay-steps 250 \
-  --lr-schedule.decay-lr 2.5e-6 \
-  --save-interval 125 \
-  --keep-period 125 \
-  --eval-interval 125 \
-  --eval-num-batches 2 \
-  --eval-batch-size 8 \
-  --eval-num-workers 0 \
-  --eval-repo-id "$DATA_REPO" \
-  --eval-asset-id "$ASSET_ID" \
-  --eval-assets-dir "$ASSET_DIR" \
-  --eval-filter-path "$VAL_SPLIT" \
-  --no-wandb-enabled \
-  > logs/pi05_tactile_ttt_v1_warmup_press_0831.log 2>&1 &
+## TactileTTT v1：阶段一250step，仅 warm-up TTT 参数,第二阶段联合训练750step
 
-## TactileTTT v1：阶段二，加载 warm-up 参数后联合训练
-# 当前训练循环的250-step run最终保存目录标号为249；请以实际日志为准。不要使用 --resume。
-FINAL_STEP=249
-WARMUP_PARAMS="$PROJECT_ROOT/checkpoints/pi05_tactile_ttt_v1_warmup/pi05_tactile_ttt_v1_warmup_press_0831/$FINAL_STEP/params"
 
-setsid nohup env CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+setsid nohup env \
+GPU_IDS=0,1,2,3,4,5,6,7 \
+FSDP_DEVICES=4 \
+BATCH_SIZE=8 \
+NUM_WORKERS=0 \
+WARMUP_STEPS=250 \
+JOINT_STEPS=750 \
+DATA_REPO=data/press_button_4_times \
+ASSET_ID=press_button_4_times \
+ASSET_DIR=assets/pi05_tactile_current \
+TRAIN_SPLIT=outputs/episode_splits/press_button_4_times/train_episodes.json \
+VAL_SPLIT=outputs/episode_splits/press_button_4_times/val_episodes.json \
+PATCH_ENCODER_PARAMS=/workspace/mnt/sqzhang26/FactileLDM/checkpoints/xhand_patch_tactile_encoder_pretrain/patch_informed_full_heads_taskall2_encoder_final_20k_0722/19999/params \
+bash scripts/run_tactile_ttt_v1_two_stage.sh \
+> "logs/tactile_ttt_v1_two_stage_0831.scheduler.log" 2>&1 &
+
+
+# 单阶段整体训练 1000steps
+setsid nohup env \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 /workspace/mnt/sqzhang26/FactileLDM/env/.venv/bin/python scripts/train.py \
   pi05_tactile_ttt_v1 \
-  --exp-name pi05_tactile_ttt_v1_joint_press_0831 \
+  --exp-name pi05_tactile_ttt_v1_0831 \
   --data.repo-id "$DATA_REPO" \
   --data.assets.asset-id "$ASSET_ID" \
   --data.assets.assets-dir "$ASSET_DIR" \
   --train-filter-path "$TRAIN_SPLIT" \
-  --weight-loader.pi0-params-path "$WARMUP_PARAMS" \
   --weight-loader.encoder-params-path "$PATCH_ENCODER_PARAMS" \
-  --num-train-steps 750 \
+  --num-train-steps 1000 \
   --batch-size 8 \
   --fsdp-devices 4 \
   --num-workers 0 \
-  --lr-schedule.warmup-steps 75 \
+  --lr-schedule.warmup-steps 100 \
   --lr-schedule.peak-lr 2.5e-5 \
-  --lr-schedule.decay-steps 750 \
+  --lr-schedule.decay-steps 1000 \
   --lr-schedule.decay-lr 2.5e-6 \
   --save-interval 250 \
   --keep-period 250 \
@@ -126,7 +110,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false \
   --eval-assets-dir "$ASSET_DIR" \
   --eval-filter-path "$VAL_SPLIT" \
   --no-wandb-enabled \
-  > logs/pi05_tactile_ttt_v1_joint_press_0831.log 2>&1 &
+  > logs/pi05_tactile_ttt_v1_0831.log 2>&1 &
 
 ### pi05
   setsid nohup env \
