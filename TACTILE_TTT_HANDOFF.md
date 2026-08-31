@@ -351,6 +351,8 @@ TPE预训练配置属于PI0，原本使用z-score；接入π0.5后被切换为qu
 
 加载模型参数。episode runtime fast state不会跨run保存；checkpoint保存并传递的是学习到的每层fast-state初始化参数。
 
+单阶段和两阶段使用完全相同的student-only TactileTTT模型参数树。TTT配置不再构造teacher action head、teacher tactile tokenizer、蒸馏projector、future query/flow、flow VAE投影、patch auxiliary head以及pi05不读取的连续state projector；warm-up与joint仅由冻结规则区分。该结构变更后不能对旧TTT train-state直接使用`--resume`，应从基础pi05参数或旧checkpoint的`params`新建run。
+
 ## 12. 下一步执行顺序
 
 ### P0：服务器验证v1代码
@@ -402,7 +404,7 @@ TPE预训练配置属于PI0，原本使用z-score；接入π0.5后被切换为qu
 
 - gemma.py：在每个Action Expert Transformer block的attention后插入layer-specific TTT-MLP；
 - tactile_ttt.py：实现两层fast MLP、K/V binding、Q读取、可学习inner LR和vector residual gate；
-- pi0_latent_flow.py：维护每层episode fast state，训练与部署按chunk携带，flow denoising只提交一次更新；
+- pi0_latent_flow.py：维护每层episode fast state，训练与部署按chunk携带，flow denoising只提交一次更新；TTT配置只构造student与TTT所需参数，不构造teacher/蒸馏/future-flow辅助模块；
 - pi0_config.py、training/config.py：删除v0入口并注册pi05_tactile_ttt_v1；
 - tactile_ttt_test.py：覆盖状态写入、禁写mask、门控、residual gate与Gemma逐层集成；
 - training/config.py：另外注册TTT-only warm-up冻结规则和pi05_tactile_ttt_v1_warmup；

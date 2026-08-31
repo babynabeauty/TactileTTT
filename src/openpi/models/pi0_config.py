@@ -408,8 +408,17 @@ class Pi0LatentFlowConfig(Pi0Config):
                     raise ValueError("TactileTTT inner_lr must be positive.")
                 if self.tactile_ttt_contact_temperature <= 0:
                     raise ValueError("TactileTTT contact temperature must be positive.")
-                if self.cached_vlm_async_ae_enabled or self.async_tactile_refiner_enabled:
-                    raise ValueError("The first TactileTTT model does not use asynchronous action refinement.")
+                if self.use_future_flow:
+                    raise ValueError("TactileTTT does not use future-flow auxiliary tokens.")
+                if self.tactile_patch_aux_loss_weight > 0:
+                    raise ValueError("TactileTTT does not use the teacher patch-distribution auxiliary loss.")
+                if (
+                    self.tactile_refiner_enabled
+                    or self.async_tactile_refiner_enabled
+                    or self.async_tactile_flow_refiner_enabled
+                    or self.cached_vlm_async_ae_enabled
+                ):
+                    raise ValueError("TactileTTT does not use action-refiner auxiliary modules.")
             object.__setattr__(self, "distill_layer_indices", (self.future_tactile_align_layer,))
         if self.arm_hand_mask_attention:
             if not self.structured_tactile:

@@ -65,3 +65,22 @@ def test_joint_v1_keeps_the_same_model_but_removes_warmup_freeze():
     assert not _paths(state.filter(joint.freeze_filter))
     assert joint.model.disable_future_tactile
     assert joint.model.tactile_ttt_enabled
+
+
+def test_single_and_two_stage_ttt_disable_teacher_and_auxiliary_paths():
+    warmup = training_config.get_config("pi05_tactile_ttt_v1_warmup")
+    joint = training_config.get_config("pi05_tactile_ttt_v1")
+
+    for config in (warmup, joint):
+        model = config.model
+        assert model.disable_future_tactile
+        assert not model.direct_future_tactile_align
+        assert not model.use_future_flow
+        assert model.teacher_action_loss_weight == 0.0
+        assert model.future_force_align_loss_weight == 0.0
+        assert model.future_flow_align_loss_weight == 0.0
+        assert model.tactile_patch_aux_loss_weight == 0.0
+        assert not model.tactile_refiner_enabled
+        assert not model.async_tactile_refiner_enabled
+        assert not model.async_tactile_flow_refiner_enabled
+        assert not model.cached_vlm_async_ae_enabled

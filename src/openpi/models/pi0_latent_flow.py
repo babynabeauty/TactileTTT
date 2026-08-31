@@ -196,6 +196,10 @@ class Pi0LatentFlow(_model.BaseModel):
         self.tactile_ttt_contact_temperature = float(getattr(config, "tactile_ttt_contact_temperature", 0.5))
         self.sequence_training = self.tactile_ttt_enabled
         self.use_teacher_ae = not (self.disable_future_tactile or self.direct_future_tactile_align)
+        # The TactileTTT path is deliberately student-only.  Keep the legacy
+        # latent-flow parameter tree unchanged for every other configuration so
+        # existing checkpoints remain compatible.
+        build_legacy_auxiliary_modules = not self.tactile_ttt_enabled
         self.tactile_patch_fingers = tuple(int(finger) for finger in getattr(config, "tactile_patch_fingers", (0, 1, 2)))
         self.tactile_num_patches = int(getattr(config, "tactile_num_patches", 5))
         self.tactile_patch_aux_loss_weight = float(getattr(config, "tactile_patch_aux_loss_weight", 0.0))
@@ -292,8 +296,10 @@ class Pi0LatentFlow(_model.BaseModel):
                 tactile_ttt_inner_lr=self.tactile_ttt_inner_lr,
                 tactile_ttt_residual_gate_init=self.tactile_ttt_residual_gate_init,
             )
-        teacher_variant = getattr(config, "force_expert_variant", config.action_expert_variant)
-        teacher_config = _gemma.get_config(teacher_variant)
+        teacher_config = student_config
+        if not self.tactile_ttt_enabled:
+            teacher_variant = getattr(config, "force_expert_variant", config.action_expert_variant)
+            teacher_config = _gemma.get_config(teacher_variant)
         self.student_width = int(student_config.width)
         self.teacher_width = int(teacher_config.width)
         self.distill_projector_hidden_dim = int(
@@ -339,20 +345,24 @@ class Pi0LatentFlow(_model.BaseModel):
         if config.pi05:
             self.student_time_mlp_in = nnx.Linear(student_config.width, student_config.width, rngs=rngs)
             self.student_time_mlp_out = nnx.Linear(student_config.width, student_config.width, rngs=rngs)
-            self.teacher_time_mlp_in = nnx.Linear(teacher_config.width, teacher_config.width, rngs=rngs)
-            self.teacher_time_mlp_out = nnx.Linear(teacher_config.width, teacher_config.width, rngs=rngs)
+            if build_legacy_auxiliary_modules:
+                self.teacher_time_mlp_in = nnx.Linear(teacher_config.width, teacher_config.width, rngs=rngs)
+                self.teacher_time_mlp_out = nnx.Linear(teacher_config.width, teacher_config.width, rngs=rngs)
         else:
             self.student_time_mlp_in = nnx.Linear(2 * student_config.width, student_config.width, rngs=rngs)
             self.student_time_mlp_out = nnx.Linear(student_config.width, student_config.width, rngs=rngs)
-            self.teacher_time_mlp_in = nnx.Linear(2 * teacher_config.width, teacher_config.width, rngs=rngs)
-            self.teacher_time_mlp_out = nnx.Linear(teacher_config.width, teacher_config.width, rngs=rngs)
+            if build_legacy_auxiliary_modules:
+                self.teacher_time_mlp_in = nnx.Linear(2 * teacher_config.width, teacher_config.width, rngs=rngs)
+                self.teacher_time_mlp_out = nnx.Linear(teacher_config.width, teacher_config.width, rngs=rngs)
 
-        self.state_proj_student = nnx.Linear(config.action_dim, student_config.width, rngs=rngs)
-        self.state_proj_teacher = nnx.Linear(config.action_dim, teacher_config.width, rngs=rngs)
+        if build_legacy_auxiliary_modules or not config.pi05:
+            self.state_proj_student = nnx.Linear(config.action_dim, student_config.width, rngs=rngs)
         self.action_in_proj_student = nnx.Linear(config.action_dim, student_config.width, rngs=rngs)
-        self.action_in_proj_teacher = nnx.Linear(config.action_dim, teacher_config.width, rngs=rngs)
         self.action_out_proj_student = nnx.Linear(student_config.width, config.action_dim, rngs=rngs)
-        self.action_out_proj_teacher = nnx.Linear(teacher_config.width, config.action_dim, rngs=rngs)
+        if build_legacy_auxiliary_modules:
+            self.state_proj_teacher = nnx.Linear(config.action_dim, teacher_config.width, rngs=rngs)
+            self.action_in_proj_teacher = nnx.Linear(config.action_dim, teacher_config.width, rngs=rngs)
+            self.action_out_proj_teacher = nnx.Linear(teacher_config.width, config.action_dim, rngs=rngs)
 
         if self.structured_tactile:
             if self.tactile_points_per_finger > 1:
@@ -381,7 +391,10 @@ class Pi0LatentFlow(_model.BaseModel):
                 else:
                     tokenizer_cls = RawTactileSpatialTokenizer
                 self.student_force_tokenizer = tokenizer_cls(output_dim=student_config.width, rngs=rngs, **tokenizer_kwargs)
-                self.teacher_force_tokenizer = tokenizer_cls(output_dim=teacher_config.width, rngs=rngs, **tokenizer_kwargs)
+                if build_legacy_auxiliary_modules:
+                    self.teacher_force_tokenizer = tokenizer_cls(
+                        output_dim=teacher_config.width, rngs=rngs, **tokenizer_kwargs
+                    )
             else:
                 tokenizer_kwargs = dict(
                     hidden_dim=config.tactile_tokenizer_dim,
@@ -393,31 +406,34 @@ class Pi0LatentFlow(_model.BaseModel):
                 self.student_force_tokenizer = DexterousForceTokenizer(
                     output_dim=student_config.width, rngs=rngs, **tokenizer_kwargs
                 )
-                self.teacher_force_tokenizer = DexterousForceTokenizer(
-                    output_dim=teacher_config.width, rngs=rngs, **tokenizer_kwargs
+                if build_legacy_auxiliary_modules:
+                    self.teacher_force_tokenizer = DexterousForceTokenizer(
+                        output_dim=teacher_config.width, rngs=rngs, **tokenizer_kwargs
+                    )
+            if build_legacy_auxiliary_modules:
+                self.student_query_base = nnx.Param(
+                    0.02 * jax.random.normal(rngs.params(), (student_config.width,), dtype=jnp.float32)
                 )
-            self.student_query_base = nnx.Param(
-                0.02 * jax.random.normal(rngs.params(), (student_config.width,), dtype=jnp.float32)
-            )
-            self.student_query_segment_embedding = nnx.Param(
-                0.02
-                * jax.random.normal(
-                    rngs.params(), (self.future_tactile_segments, student_config.width), dtype=jnp.float32
+                self.student_query_segment_embedding = nnx.Param(
+                    0.02
+                    * jax.random.normal(
+                        rngs.params(), (self.future_tactile_segments, student_config.width), dtype=jnp.float32
+                    )
                 )
-            )
-            self.student_query_finger_embedding = nnx.Param(
-                0.02
-                * jax.random.normal(
-                    rngs.params(), (self.tactile_tokens_per_step, student_config.width), dtype=jnp.float32
+                self.student_query_finger_embedding = nnx.Param(
+                    0.02
+                    * jax.random.normal(
+                        rngs.params(), (self.tactile_tokens_per_step, student_config.width), dtype=jnp.float32
+                    )
                 )
-            )
             if self.pool_tactile_history:
                 self.student_history_pool_logits = nnx.Param(
                     jnp.zeros((self.force_input_frames,), dtype=jnp.float32)
                 )
-                self.teacher_history_pool_logits = nnx.Param(
-                    jnp.zeros((self.force_input_frames,), dtype=jnp.float32)
-                )
+                if build_legacy_auxiliary_modules:
+                    self.teacher_history_pool_logits = nnx.Param(
+                        jnp.zeros((self.force_input_frames,), dtype=jnp.float32)
+                    )
                 if self.cached_vlm_async_history_mode == "pooled_current":
                     self.student_history_type_embedding = nnx.Param(
                         0.02
@@ -425,12 +441,13 @@ class Pi0LatentFlow(_model.BaseModel):
                             rngs.params(), (2, student_config.width), dtype=jnp.float32
                         )
                     )
-                    self.teacher_history_type_embedding = nnx.Param(
-                        0.02
-                        * jax.random.normal(
-                            rngs.params(), (2, teacher_config.width), dtype=jnp.float32
+                    if build_legacy_auxiliary_modules:
+                        self.teacher_history_type_embedding = nnx.Param(
+                            0.02
+                            * jax.random.normal(
+                                rngs.params(), (2, teacher_config.width), dtype=jnp.float32
+                            )
                         )
-                    )
             if self.tactile_ttt_enabled:
                 depth = int(student_config.depth)
                 memory_dim = self.tactile_ttt_memory_dim
@@ -451,69 +468,72 @@ class Pi0LatentFlow(_model.BaseModel):
             history_dim = self.force_input_frames * self.effort_dim_in
             future_dim = config.action_horizon * self.effort_dim_in
             self.history_force_proj_student = nnx.Linear(history_dim, student_config.width, rngs=rngs)
-            self.history_force_proj_teacher = nnx.Linear(history_dim, teacher_config.width, rngs=rngs)
-            self.future_force_proj_teacher = nnx.Linear(future_dim, teacher_config.width, rngs=rngs)
-            self.student_query = nnx.Param(
+            if build_legacy_auxiliary_modules:
+                self.history_force_proj_teacher = nnx.Linear(history_dim, teacher_config.width, rngs=rngs)
+                self.future_force_proj_teacher = nnx.Linear(future_dim, teacher_config.width, rngs=rngs)
+                self.student_query = nnx.Param(
+                    0.02 * jax.random.normal(rngs.params(), (student_config.width,), dtype=jnp.float32)
+                )
+
+        if build_legacy_auxiliary_modules:
+            self.student_future_mask_token = nnx.Param(
                 0.02 * jax.random.normal(rngs.params(), (student_config.width,), dtype=jnp.float32)
             )
-        self.student_future_mask_token = nnx.Param(
-            0.02 * jax.random.normal(rngs.params(), (student_config.width,), dtype=jnp.float32)
-        )
-        self.prompt_distill_proj_in = nnx.Linear(
-            student_config.width, self.distill_projector_hidden_dim, rngs=rngs
-        )
-        self.prompt_distill_proj_out = nnx.Linear(
-            self.distill_projector_hidden_dim, teacher_config.width, rngs=rngs
-        )
-
-        self.student_future_flow_query = nnx.Param(
-            0.02
-            * jax.random.normal(
-                rngs.params(),
-                (self.flow_token_count, self.student_width),
-                dtype=jnp.float32,
+            self.prompt_distill_proj_in = nnx.Linear(
+                student_config.width, self.distill_projector_hidden_dim, rngs=rngs
             )
-        )
-        self.teacher_future_flow_query = nnx.Param(
-            0.02
-            * jax.random.normal(
-                rngs.params(),
-                (self.flow_token_count, self.teacher_width),
-                dtype=jnp.float32,
+            self.prompt_distill_proj_out = nnx.Linear(
+                self.distill_projector_hidden_dim, teacher_config.width, rngs=rngs
             )
-        )
-        self.flow_distill_proj_in = nnx.Linear(
-            self.student_width, self.distill_projector_hidden_dim, rngs=rngs
-        )
-        self.flow_distill_proj_out = nnx.Linear(
-            self.distill_projector_hidden_dim, self.teacher_width, rngs=rngs
-        )
 
         self.flow_vae_latent_channels = int(config.flow_vae_latent_channels)
         self.flow_vae_patch_merge_factor = 2
-        self.flow_vae_proj_in = nnx.Linear(
-            self.flow_vae_latent_channels * (self.flow_vae_patch_merge_factor ** 2),
-            self.teacher_width,
-            rngs=rngs,
-        )
-        self.flow_vae_proj_out = nnx.Linear(self.teacher_width, self.teacher_width, rngs=rngs)
-        self.flow_vae_norm = nnx.LayerNorm(num_features=self.teacher_width, rngs=rngs)
-        self.scene_flow_proj_in = nnx.Linear(self.scene_flow_input_dim, self.teacher_width, rngs=rngs)
-        self.scene_flow_proj_out = nnx.Linear(self.teacher_width, self.teacher_width, rngs=rngs)
-        self.scene_flow_norm = nnx.LayerNorm(num_features=self.teacher_width, rngs=rngs)
-        self.flow_vae_query_proj = nnx.Linear(self.teacher_width, self.teacher_width, rngs=rngs)
-        self.flow_vae_key_proj = nnx.Linear(self.teacher_width, self.teacher_width, rngs=rngs)
-        self.flow_vae_value_proj = nnx.Linear(self.teacher_width, self.teacher_width, rngs=rngs)
-        self.flow_token_embedding = nnx.Param(
-            0.02
-            * jax.random.normal(
-                rngs.params(),
-                (self.flow_token_count, self.teacher_width),
-                dtype=jnp.float32,
+        if build_legacy_auxiliary_modules:
+            self.student_future_flow_query = nnx.Param(
+                0.02
+                * jax.random.normal(
+                    rngs.params(),
+                    (self.flow_token_count, self.student_width),
+                    dtype=jnp.float32,
+                )
             )
-        )
+            self.teacher_future_flow_query = nnx.Param(
+                0.02
+                * jax.random.normal(
+                    rngs.params(),
+                    (self.flow_token_count, self.teacher_width),
+                    dtype=jnp.float32,
+                )
+            )
+            self.flow_distill_proj_in = nnx.Linear(
+                self.student_width, self.distill_projector_hidden_dim, rngs=rngs
+            )
+            self.flow_distill_proj_out = nnx.Linear(
+                self.distill_projector_hidden_dim, self.teacher_width, rngs=rngs
+            )
+            self.flow_vae_proj_in = nnx.Linear(
+                self.flow_vae_latent_channels * (self.flow_vae_patch_merge_factor ** 2),
+                self.teacher_width,
+                rngs=rngs,
+            )
+            self.flow_vae_proj_out = nnx.Linear(self.teacher_width, self.teacher_width, rngs=rngs)
+            self.flow_vae_norm = nnx.LayerNorm(num_features=self.teacher_width, rngs=rngs)
+            self.scene_flow_proj_in = nnx.Linear(self.scene_flow_input_dim, self.teacher_width, rngs=rngs)
+            self.scene_flow_proj_out = nnx.Linear(self.teacher_width, self.teacher_width, rngs=rngs)
+            self.scene_flow_norm = nnx.LayerNorm(num_features=self.teacher_width, rngs=rngs)
+            self.flow_vae_query_proj = nnx.Linear(self.teacher_width, self.teacher_width, rngs=rngs)
+            self.flow_vae_key_proj = nnx.Linear(self.teacher_width, self.teacher_width, rngs=rngs)
+            self.flow_vae_value_proj = nnx.Linear(self.teacher_width, self.teacher_width, rngs=rngs)
+            self.flow_token_embedding = nnx.Param(
+                0.02
+                * jax.random.normal(
+                    rngs.params(),
+                    (self.flow_token_count, self.teacher_width),
+                    dtype=jnp.float32,
+                )
+            )
 
-        if self.tactile_patch_aux_loss_weight > 0:
+        if build_legacy_auxiliary_modules and self.tactile_patch_aux_loss_weight > 0:
             self.teacher_patch_dist_head = nnx.Linear(self.teacher_width, self.tactile_num_patches, rngs=rngs)
 
         if self.tactile_refiner_enabled:
