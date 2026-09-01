@@ -352,6 +352,19 @@ def eval_step(
     eval_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
 
+    if observation.sequence_mask is not None:
+        valid_examples = jnp.any(jnp.asarray(observation.sequence_mask) > 0, axis=1).astype(jnp.float32)
+    else:
+        valid_examples = jnp.ones((actions.shape[0],), dtype=jnp.float32)
+    eval_weight = jnp.sum(valid_examples)
+
+    def valid_mean(value):
+        value = jnp.asarray(value)
+        if value.ndim == 0 or value.shape[0] != valid_examples.shape[0]:
+            return jnp.mean(value)
+        per_example = jnp.mean(value, axis=tuple(range(1, value.ndim))) if value.ndim > 1 else value
+        return jnp.sum(per_example * valid_examples) / jnp.maximum(eval_weight, 1.0)
+
     if has_loss_stats:
         if getattr(model, "uses_train_progress", False):
             if getattr(model, "sequence_training", False):
@@ -364,15 +377,15 @@ def eval_step(
                 )
         else:
             chunked_loss, loss_stats = model.compute_loss_with_stats(eval_rng, observation, actions, train=False)
-        info = {"loss": jnp.mean(chunked_loss)}
-        info.update(jax.tree.map(jnp.mean, loss_stats))
+        info = {"loss": valid_mean(chunked_loss), "_eval_weight": eval_weight}
+        info.update(jax.tree.map(valid_mean, loss_stats))
         return info
 
     if getattr(model, "uses_train_progress", False):
         chunked_loss = model.compute_loss(eval_rng, observation, actions, train=False, train_progress=eval_progress)
     else:
         chunked_loss = model.compute_loss(eval_rng, observation, actions, train=False)
-    return {"loss": jnp.mean(chunked_loss)}
+    return {"loss": valid_mean(chunked_loss), "_eval_weight": eval_weight}
 
 
 @at.typecheck
@@ -450,7 +463,17 @@ def _run_validation(
         eval_batch = next(eval_iter)
         eval_infos.append(peval_step(eval_rng, train_state, eval_batch))
     stacked_infos = common_utils.stack_forest(eval_infos)
-    reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
+    eval_weights = stacked_infos.pop("_eval_weight")
+    valid_example_count = jnp.sum(eval_weights)
+    total_weight = jnp.maximum(valid_example_count, 1.0)
+    reduced_info = jax.device_get(
+        jax.tree.map(lambda values: jnp.sum(values * eval_weights) / total_weight, stacked_infos)
+    )
+    logging.info(
+        "Validation covered %d unpadded examples across %d batches.",
+        int(jax.device_get(valid_example_count)),
+        len(eval_infos),
+    )
     prefixed = {f"eval/{key}": value for key, value in reduced_info.items()}
     logging.info("Eval step %d: %s", step, ", ".join(f"{k}={_fmt_val(v)}" for k, v in prefixed.items()))
     return prefixed
@@ -537,6 +560,9 @@ def main(config: _config.TrainConfig):
             eval_config,
             sharding=data_sharding,
             shuffle=False,
+            # TactileTTT sequence batches carry sequence_mask, which lets the
+            # loader pad and mask a final incomplete static JAX batch safely.
+            drop_last=not bool(getattr(eval_config.model, "tactile_ttt_enabled", False)),
         )
         eval_iter = iter(eval_loader)
 

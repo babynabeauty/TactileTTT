@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+import functools
 import json
 import logging
 import multiprocessing
@@ -694,6 +695,7 @@ def create_data_loader(
     *,
     sharding: jax.sharding.Sharding | None = None,
     shuffle: bool = False,
+    drop_last: bool = True,
     num_batches: int | None = None,
     skip_norm_stats: bool = False,
     framework: Literal["jax", "pytorch"] = "jax",
@@ -704,6 +706,7 @@ def create_data_loader(
         config: The training configuration.
         sharding: The sharding to use for the data loader (JAX only).
         shuffle: Whether to shuffle the data.
+        drop_last: Whether to discard a final incomplete batch.
         num_batches: Determines the number of batches to return.
         skip_norm_stats: Whether to skip data normalization.
         framework: The framework to use ("jax" or "pytorch").
@@ -718,6 +721,7 @@ def create_data_loader(
         batch_size=config.batch_size,
         sharding=sharding,
         shuffle=shuffle,
+        drop_last=drop_last,
         num_batches=num_batches,
         num_workers=config.num_workers,
         seed=config.seed,
@@ -735,6 +739,7 @@ def create_torch_data_loader(
     sharding: jax.sharding.Sharding | None = None,
     skip_norm_stats: bool = False,
     shuffle: bool = False,
+    drop_last: bool = True,
     num_batches: int | None = None,
     num_workers: int = 0,
     seed: int = 0,
@@ -750,6 +755,9 @@ def create_torch_data_loader(
             use a single device sharding.
         skip_norm_stats: Whether to skip data normalization.
         shuffle: Whether to shuffle the data.
+        drop_last: Whether to discard a final incomplete batch. When false,
+            sequence batches are padded to the static local batch size and the
+            padded examples receive an all-zero sequence mask.
         num_batches: Determines the number of batches to return. If the number exceeds the
             number of batches in the dataset, the data loader will loop over the dataset.
             If not provided, will iterate over the dataset indefinitely.
@@ -780,7 +788,7 @@ def create_torch_data_loader(
                 num_replicas=torch.distributed.get_world_size(),
                 rank=torch.distributed.get_rank(),
                 shuffle=shuffle,
-                drop_last=True,
+                drop_last=drop_last,
             )
             local_batch_size = batch_size // torch.distributed.get_world_size()
         else:
@@ -795,6 +803,7 @@ def create_torch_data_loader(
         sharding=None if framework == "pytorch" else sharding,
         shuffle=(sampler is None and shuffle),  # Don't shuffle if using sampler
         sampler=sampler,
+        drop_last=drop_last,
         num_batches=num_batches,
         num_workers=num_workers,
         seed=seed,
@@ -815,6 +824,7 @@ class TorchDataLoader:
         sharding: jax.sharding.Sharding | None = None,
         shuffle: bool = False,
         sampler: torch.utils.data.Sampler | None = None,
+        drop_last: bool = True,
         num_batches: int | None = None,
         num_workers: int = 0,
         seed: int = 0,
@@ -827,6 +837,8 @@ class TorchDataLoader:
             local_batch_size: The local batch size for each process.
             sharding: The sharding to use for the data loader.
             shuffle: Whether to shuffle the data.
+            drop_last: Whether to discard a final incomplete batch. Sequence
+                batches are padded to ``local_batch_size`` when this is false.
             num_batches: If provided, determines the number of returned batches. If the
                 number is larger than the number of batches in the dataset, the data loader
                 will loop over the dataset. If not provided, will iterate over the dataset
@@ -838,7 +850,9 @@ class TorchDataLoader:
         if jax.process_count() > 1:
             raise NotImplementedError("Data loading with multiple processes is not supported.")
 
-        if len(dataset) < local_batch_size:
+        if len(dataset) == 0:
+            raise ValueError("Dataset is empty.")
+        if drop_last and len(dataset) < local_batch_size:
             raise ValueError(f"Local batch size ({local_batch_size}) is larger than the dataset size ({len(dataset)}).")
 
         # Store sharding - None for PyTorch, JAX sharding for JAX
@@ -865,9 +879,12 @@ class TorchDataLoader:
             num_workers=num_workers,
             multiprocessing_context=mp_context,
             persistent_workers=num_workers > 0,
-            collate_fn=_collate_fn,
+            collate_fn=functools.partial(
+                _collate_fn,
+                pad_to_batch_size=None if drop_last else local_batch_size,
+            ),
             worker_init_fn=_worker_init_fn,
-            drop_last=True,
+            drop_last=drop_last,
             generator=generator,
         )
 
@@ -894,11 +911,20 @@ class TorchDataLoader:
                     yield jax.tree.map(torch.as_tensor, batch)
 
 
-def _collate_fn(items):
-    """Collate the batch elements into batched numpy arrays."""
+def _collate_fn(items, *, pad_to_batch_size: int | None = None):
+    """Collate items and optionally mask padding for a static sequence batch."""
+    num_valid = len(items)
+    if pad_to_batch_size is not None and num_valid < pad_to_batch_size:
+        if not items or "sequence_mask" not in items[0]:
+            raise ValueError("Padding an incomplete batch requires sequence_mask in every item.")
+        items = [*items, *([items[-1]] * (pad_to_batch_size - num_valid))]
+
     # Make sure to convert to numpy arrays before stacking since some of the incoming elements
     # may be JAX arrays.
-    return jax.tree.map(lambda *xs: np.stack([np.asarray(x) for x in xs], axis=0), *items)
+    batch = jax.tree.map(lambda *xs: np.stack([np.asarray(x) for x in xs], axis=0), *items)
+    if pad_to_batch_size is not None and num_valid < pad_to_batch_size:
+        batch["sequence_mask"][num_valid:] = 0.0
+    return batch
 
 
 def _worker_init_fn(worker_id: int) -> None:
