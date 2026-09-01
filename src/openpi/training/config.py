@@ -2326,6 +2326,12 @@ def _pi05_tactile_ttt_v1_config(source_name: str, new_name: str) -> TrainConfig:
             pi0_params_path="checkpoints/pi05_base/params",
             encoder_params_path=None,
         ),
+        policy_metadata={
+            "policy_input_mode": "tactile_ttt",
+            "tactile_history_offsets": tuple(range(-15, 1)),
+            "action_horizon": 16,
+            "tactile_ttt_enabled": True,
+        },
         batch_size=1,
         # Episode-sequence TTT batches require substantial video decoding.
         # Keep workers enabled by default so CPU loading overlaps GPU compute.
@@ -2395,6 +2401,12 @@ def _pi05_direct_tactile_config(
             pi0_params_path="checkpoints/pi05_base/params",
             encoder_params_path=None,
         ),
+        policy_metadata={
+            "policy_input_mode": "direct16" if len(history_offsets) == 16 else "tactile_current",
+            "tactile_history_offsets": history_offsets,
+            "action_horizon": 16,
+            "tactile_ttt_enabled": False,
+        },
         batch_size=1,
         num_workers=0,
         ema_decay=None,
