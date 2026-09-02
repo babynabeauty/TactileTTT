@@ -18,6 +18,7 @@ import argparse
 import copy
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 from typing import Any
@@ -27,7 +28,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-CORE_META_FILES = {"info.json", "episodes.jsonl", "episodes_stats.jsonl", "tasks.jsonl"}
+CORE_META_FILES = {"info.json", "episodes.jsonl", "episodes_stats.jsonl", "tasks.jsonl", "stats.json"}
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -130,6 +131,56 @@ def update_index_stats(
     return output
 
 
+def aggregate_episode_stats(episode_stats: list[dict[str, Any]]) -> dict[str, Any]:
+    """Combine per-episode population statistics into dataset statistics."""
+    if not episode_stats:
+        return {}
+
+    feature_names = set(episode_stats[0])
+    if any(set(stats) != feature_names for stats in episode_stats[1:]):
+        raise ValueError("Per-episode statistics contain inconsistent feature sets.")
+
+    output: dict[str, Any] = {}
+    for feature_name in sorted(feature_names):
+        feature_stats = [stats[feature_name] for stats in episode_stats]
+        counts = np.asarray([stats["count"][0] for stats in feature_stats], dtype=np.float64)
+        total_count = float(counts.sum())
+        if total_count <= 0:
+            raise ValueError(f"Invalid statistics count for feature {feature_name!r}.")
+
+        mins = np.asarray([stats["min"] for stats in feature_stats], dtype=np.float64)
+        maxs = np.asarray([stats["max"] for stats in feature_stats], dtype=np.float64)
+        means = np.asarray([stats["mean"] for stats in feature_stats], dtype=np.float64)
+        stds = np.asarray([stats["std"] for stats in feature_stats], dtype=np.float64)
+        weights = counts.reshape((-1,) + (1,) * (means.ndim - 1))
+        mean = np.sum(weights * means, axis=0) / total_count
+        second_moment = np.sum(weights * (np.square(stds) + np.square(means)), axis=0) / total_count
+        variance = np.maximum(second_moment - np.square(mean), 0.0)
+
+        output[feature_name] = {
+            "min": np.min(mins, axis=0).tolist(),
+            "max": np.max(maxs, axis=0).tolist(),
+            "mean": mean.tolist(),
+            "std": np.sqrt(variance).tolist(),
+            "count": [int(total_count)],
+        }
+    return output
+
+
+def parse_exclusions(values: list[str]) -> dict[str, set[int]]:
+    exclusions: dict[str, set[int]] = {}
+    for value in values:
+        try:
+            source_name, episode_text = value.split(":", maxsplit=1)
+            episode_indices = {int(item) for item in episode_text.split(",") if item}
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid --exclude-episodes value {value!r}; expected SOURCE:0,1,2."
+            ) from exc
+        exclusions.setdefault(source_name, set()).update(episode_indices)
+    return exclusions
+
+
 def copy_video_streams(
     source: Path,
     output: Path,
@@ -137,6 +188,7 @@ def copy_video_streams(
     old_episode_index: int,
     new_episode_index: int,
     output_chunk_size: int,
+    link: bool,
 ) -> int:
     videos_root = source / "videos"
     if not videos_root.exists():
@@ -153,7 +205,10 @@ def copy_video_streams(
             / f"episode_{new_episode_index:06d}.mp4"
         )
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_video, destination)
+        if link:
+            os.link(source_video, destination)
+        else:
+            shutil.copy2(source_video, destination)
     return len(matches)
 
 
@@ -184,6 +239,18 @@ def main() -> None:
     parser.add_argument("--sources", type=Path, nargs="+", required=True, help="Input LeRobot dataset roots.")
     parser.add_argument("--output", type=Path, required=True, help="Output LeRobot dataset root.")
     parser.add_argument("--overwrite", action="store_true", help="Delete an existing output directory.")
+    parser.add_argument(
+        "--exclude-episodes",
+        action="append",
+        default=[],
+        metavar="SOURCE:IDS",
+        help="Skip comma-separated episode indices from a source directory name; may be repeated.",
+    )
+    parser.add_argument(
+        "--link-videos",
+        action="store_true",
+        help="Hard-link videos instead of copying them (requires inputs/output on one filesystem).",
+    )
     args = parser.parse_args()
 
     sources = [path.expanduser().resolve() for path in args.sources]
@@ -196,6 +263,11 @@ def main() -> None:
         shutil.rmtree(output)
 
     infos = validate_sources(sources)
+    exclusions = parse_exclusions(args.exclude_episodes)
+    source_names = {source.name for source in sources}
+    unknown_sources = set(exclusions) - source_names
+    if unknown_sources:
+        raise ValueError(f"Unknown source names in exclusions: {sorted(unknown_sources)}")
     output.mkdir(parents=True)
     copy_ancillary_files(sources[0], output)
 
@@ -209,6 +281,8 @@ def main() -> None:
     next_episode_index = 0
     next_global_index = 0
     total_videos = 0
+    output_source_map: list[dict[str, Any]] = []
+    output_exclusions: list[dict[str, Any]] = []
 
     for source, info in zip(sources, infos, strict=True):
         source_tasks = {
@@ -226,6 +300,12 @@ def main() -> None:
 
         expected_episodes = int(info["total_episodes"])
         for old_episode_index in range(expected_episodes):
+            if old_episode_index in exclusions.get(source.name, set()):
+                output_exclusions.append(
+                    {"source": source.name, "episode_index": old_episode_index, "reason": "excluded_by_user"}
+                )
+                print(f"{source.name}: episode {old_episode_index} excluded")
+                continue
             source_parquet = episode_path(source, info, old_episode_index)
             if not source_parquet.exists():
                 raise FileNotFoundError(f"Missing episode parquet: {source_parquet}")
@@ -277,6 +357,14 @@ def main() -> None:
                 old_episode_index=old_episode_index,
                 new_episode_index=next_episode_index,
                 output_chunk_size=output_chunk_size,
+                link=args.link_videos,
+            )
+            output_source_map.append(
+                {
+                    "episode_index": next_episode_index,
+                    "source": source.name,
+                    "source_episode_index": old_episode_index,
+                }
             )
             print(
                 f"{source.name}: episode {old_episode_index} -> {next_episode_index} "
@@ -297,6 +385,13 @@ def main() -> None:
     write_jsonl(output / "meta" / "episodes.jsonl", output_episodes)
     if output_episode_stats:
         write_jsonl(output / "meta" / "episodes_stats.jsonl", output_episode_stats)
+        write_json(
+            output / "meta" / "stats.json",
+            aggregate_episode_stats([row["stats"] for row in output_episode_stats]),
+        )
+    write_jsonl(output / "meta" / "source_episode_map.jsonl", output_source_map)
+    if output_exclusions:
+        write_jsonl(output / "meta" / "excluded_episodes.jsonl", output_exclusions)
 
     print(
         f"Merged {len(sources)} datasets into {output}: "

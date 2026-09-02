@@ -13,6 +13,7 @@ TACTILE_SENSOR_COUNT = 5
 TACTILE_BLOCK_SIZE = 384
 TACTILE_BLOCK_START = 52
 TACTILE_CALC_FORCE_OFFSET = 0
+CALC_FORCE_LSB_TO_NEWTON = 0.1
 TACTILE_RAW_FORCE_OFFSET = 24
 TACTILE_RAW_FORCE_POINTS = 120
 XHAND_JOINT_COUNT = 12
@@ -527,7 +528,11 @@ class XHandTactileFlowInputs(transforms.DataTransformFn):
         return tactile.astype(np.float32)
 
     def _extract_calc_force(self, state_seq: np.ndarray) -> np.ndarray:
-        return np.stack(
+        # XHand stores calc_force in sensor LSB (1 LSB = 0.1 N).  Keep the
+        # encoder's existing tactile stream unchanged, but expose physical
+        # Newtons to the TactileTTT contact gate, whose threshold and
+        # temperature are configured in N.
+        return CALC_FORCE_LSB_TO_NEWTON * np.stack(
             [_extract_current_calc_force(state) for state in state_seq],
             axis=0,
         ).astype(np.float32)
