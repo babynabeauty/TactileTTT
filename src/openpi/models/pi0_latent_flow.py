@@ -2455,57 +2455,89 @@ class Pi0LatentFlow(_model.BaseModel):
             + self.cached_vlm_async_future_align_loss_weight * cached_async_future_align_loss
             + self.cached_vlm_async_prefix_consistency_weight * cached_prefix_consistency_loss
         )
+        # Emit only metrics belonging to modules that are actually enabled.
+        # This keeps TactileTTT logs free of legacy teacher/refiner zero losses.
         stats = {
             "loss/student_action": student_action_loss,
-            "loss/teacher_action": teacher_action_loss,
             "loss/student_action_arm": student_arm_loss,
             "loss/student_action_hand": student_hand_loss,
-            "loss/teacher_action_arm": teacher_arm_loss,
-            "loss/teacher_action_hand": teacher_hand_loss,
-            "loss/distill_future_force": future_force_align_loss,
-            "loss/distill_future_flow": future_flow_align_loss,
-            "loss/distill_future_force_mean": jnp.mean(raw_future_force_align_loss),
-            "loss/distill_future_flow_mean": jnp.mean(raw_future_flow_align_loss),
-            "loss/patch_distribution_aux": patch_distribution_aux_loss,
-            "loss/hand_synergy": synergy_loss,
-            "loss/tactile_refiner_delta_reg": delta_reg_loss,
-            "loss/async_refiner": async_refiner_loss,
-            "loss/async_refiner_delta_reg": async_refiner_stats["delta_reg"],
-            "loss/async_refiner_gate_reg": async_refiner_stats["gate_reg"],
-            "async_refiner/gate_mean": async_refiner_stats["gate_mean"],
-            "async_refiner/delta_abs_mean": async_refiner_stats["delta_abs_mean"],
-            "async_refiner/offset": jnp.broadcast_to(
-                async_refiner_stats["offset"], student_action_loss.shape
-            ),
-            "loss/async_flow_refiner": async_flow_refiner_loss,
-            "async_flow_refiner/velocity_abs_mean": async_flow_refiner_stats["velocity_abs_mean"],
-            "async_flow_refiner/offset": jnp.broadcast_to(
-                async_flow_refiner_stats["offset"], student_action_loss.shape
-            ),
-            "async_flow_refiner/timestep": async_flow_refiner_stats["timestep"],
-            "loss/cached_async_action": cached_async_action_loss,
-            "loss/cached_async_future_align": cached_async_future_align_loss,
-            "loss/cached_async_prefix_consistency": cached_prefix_consistency_loss,
-            "cached_async/offset": jnp.broadcast_to(
-                jnp.asarray(cached_async_offset, dtype=jnp.float32), student_action_loss.shape
-            ),
-            "cached_async/prefix_segments": jnp.broadcast_to(
-                jnp.asarray(prefix_segments, dtype=jnp.float32), student_action_loss.shape
-            ),
-            "tactile_refiner/gate_mean": (
-                jnp.mean(tactile_refiner_stats["gate"], axis=(-2, -1))
-                if self.tactile_refiner_enabled
-                else jnp.zeros_like(student_action_loss)
-            ),
-            "tactile_refiner/delta_abs_mean": (
-                jnp.mean(jnp.abs(tactile_refiner_stats["delta_hand"]), axis=(-2, -1))
-                if self.tactile_refiner_enabled
-                else jnp.zeros_like(student_action_loss)
-            ),
-            "noise/student_future_query_token_rate": jnp.mean(noised_token_rate),
-            "noise/student_future_query_scale": self._student_query_noise_scale(train_progress),
             "loss/total": total_loss,
         }
+        if self.use_teacher_ae:
+            stats.update(
+                {
+                    "loss/teacher_action": teacher_action_loss,
+                    "loss/teacher_action_arm": teacher_arm_loss,
+                    "loss/teacher_action_hand": teacher_hand_loss,
+                }
+            )
+        if not self.disable_future_tactile:
+            stats.update(
+                {
+                    "loss/distill_future_force": future_force_align_loss,
+                    "loss/distill_future_force_mean": jnp.mean(raw_future_force_align_loss),
+                    "noise/student_future_query_token_rate": jnp.mean(noised_token_rate),
+                    "noise/student_future_query_scale": self._student_query_noise_scale(train_progress),
+                }
+            )
+        if self.use_future_flow:
+            stats.update(
+                {
+                    "loss/distill_future_flow": future_flow_align_loss,
+                    "loss/distill_future_flow_mean": jnp.mean(raw_future_flow_align_loss),
+                }
+            )
+        if self.tactile_patch_aux_loss_weight > 0:
+            stats["loss/patch_distribution_aux"] = patch_distribution_aux_loss
+        if self.tactile_refiner_enabled:
+            stats.update(
+                {
+                    "loss/hand_synergy": synergy_loss,
+                    "loss/tactile_refiner_delta_reg": delta_reg_loss,
+                    "tactile_refiner/gate_mean": jnp.mean(tactile_refiner_stats["gate"], axis=(-2, -1)),
+                    "tactile_refiner/delta_abs_mean": jnp.mean(
+                        jnp.abs(tactile_refiner_stats["delta_hand"]), axis=(-2, -1)
+                    ),
+                }
+            )
+        if self.async_tactile_refiner_enabled:
+            stats.update(
+                {
+                    "loss/async_refiner": async_refiner_loss,
+                    "loss/async_refiner_delta_reg": async_refiner_stats["delta_reg"],
+                    "loss/async_refiner_gate_reg": async_refiner_stats["gate_reg"],
+                    "async_refiner/gate_mean": async_refiner_stats["gate_mean"],
+                    "async_refiner/delta_abs_mean": async_refiner_stats["delta_abs_mean"],
+                    "async_refiner/offset": jnp.broadcast_to(
+                        async_refiner_stats["offset"], student_action_loss.shape
+                    ),
+                }
+            )
+        if self.async_tactile_flow_refiner_enabled:
+            stats.update(
+                {
+                    "loss/async_flow_refiner": async_flow_refiner_loss,
+                    "async_flow_refiner/velocity_abs_mean": async_flow_refiner_stats["velocity_abs_mean"],
+                    "async_flow_refiner/offset": jnp.broadcast_to(
+                        async_flow_refiner_stats["offset"], student_action_loss.shape
+                    ),
+                    "async_flow_refiner/timestep": async_flow_refiner_stats["timestep"],
+                }
+            )
+        if self.cached_vlm_async_ae_enabled:
+            stats.update(
+                {
+                    "loss/cached_async_action": cached_async_action_loss,
+                    "loss/cached_async_future_align": cached_async_future_align_loss,
+                    "loss/cached_async_prefix_consistency": cached_prefix_consistency_loss,
+                    "cached_async/offset": jnp.broadcast_to(
+                        jnp.asarray(cached_async_offset, dtype=jnp.float32), student_action_loss.shape
+                    ),
+                    "cached_async/prefix_segments": jnp.broadcast_to(
+                        jnp.asarray(prefix_segments, dtype=jnp.float32), student_action_loss.shape
+                    ),
+                }
+            )
         if self.tactile_ttt_enabled:
             stats.update(
                 {
@@ -2617,6 +2649,45 @@ class Pi0LatentFlow(_model.BaseModel):
             while denom.ndim < stacked.ndim - 1:
                 denom = denom[..., None]
             reduced_stats[key] = jnp.sum(stacked * mask, axis=1) / denom
+
+        # The soft gate is mathematically non-zero for every valid chunk. For
+        # readable logs, define a physical write event at gate >= 0.5, exactly
+        # corresponding to max calc_force >= the configured contact threshold.
+        gate_time = jnp.asarray(time_stats["tactile_ttt/contact_gate"])
+        if gate_time.ndim == 1:
+            stacked_gate = jnp.broadcast_to(gate_time[None, :], (batch_size, sequence_length))
+        else:
+            stacked_gate = jnp.swapaxes(gate_time, 0, 1)
+        write_events = (stacked_gate >= 0.5).astype(jnp.float32) * sequence_mask
+        write_count = jnp.sum(write_events, axis=1)
+        update_norm_time = jnp.asarray(time_stats["tactile_ttt/fast_weight_update_norm"])
+        if update_norm_time.ndim == 1:
+            stacked_update_norm = jnp.broadcast_to(
+                update_norm_time[None, :], (batch_size, sequence_length)
+            )
+        else:
+            stacked_update_norm = jnp.swapaxes(update_norm_time, 0, 1)
+        update_events = (stacked_update_norm > 1e-8).astype(jnp.float32) * sequence_mask
+        update_count = jnp.sum(update_events, axis=1)
+        chunk_ids = jnp.arange(sequence_length, dtype=jnp.float32)[None, :]
+        has_write = write_count > 0
+        has_update = update_count > 0
+        first_write = jnp.min(jnp.where(write_events > 0, chunk_ids, float(sequence_length)), axis=1)
+        last_write = jnp.max(jnp.where(write_events > 0, chunk_ids, -1.0), axis=1)
+        first_update = jnp.min(jnp.where(update_events > 0, chunk_ids, float(sequence_length)), axis=1)
+        last_update = jnp.max(jnp.where(update_events > 0, chunk_ids, -1.0), axis=1)
+        reduced_stats.update(
+            {
+                "tactile_ttt/write_rate": write_count / denominator,
+                "tactile_ttt/write_count": write_count,
+                "tactile_ttt/first_write_chunk": jnp.where(has_write, first_write, -1.0),
+                "tactile_ttt/last_write_chunk": jnp.where(has_write, last_write, -1.0),
+                "tactile_ttt/update_rate": update_count / denominator,
+                "tactile_ttt/first_update_chunk": jnp.where(has_update, first_update, -1.0),
+                "tactile_ttt/last_update_chunk": jnp.where(has_update, last_update, -1.0),
+                "tactile_ttt/valid_chunk_count": denominator,
+            }
+        )
         return sequence_loss, reduced_stats
 
     def compute_loss(

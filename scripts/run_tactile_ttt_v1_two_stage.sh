@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Sequential TactileTTT v1 training:
+# Sequential TactileTTT v1/v2 training (select with TTT_VERSION):
 #   stage 1: train only TTT parameters
 #   stage 2: load stage-1 params into a fresh run and jointly train all parameters
 #
@@ -26,10 +26,15 @@ VAL_SPLIT="${VAL_SPLIT:-outputs/episode_splits/press_button_4_times/val_episodes
 PATCH_ENCODER_PARAMS="${PATCH_ENCODER_PARAMS:-/workspace/mnt/sqzhang26/FactileLDM/checkpoints/xhand_patch_tactile_encoder_pretrain/patch_informed_full_heads_taskall2_encoder_final_20k_0722/19999/params}"
 
 RUN_TAG="${RUN_TAG:-studentonly_$(date +%m%d_%H%M%S)}"
-WARMUP_CONFIG="pi05_tactile_ttt_v1_warmup"
-JOINT_CONFIG="pi05_tactile_ttt_v1"
-WARMUP_EXP="${WARMUP_EXP:-pi05_tactile_ttt_v1_warmup_${RUN_TAG}}"
-JOINT_EXP="${JOINT_EXP:-pi05_tactile_ttt_v1_twostage_joint_${RUN_TAG}}"
+TTT_VERSION="${TTT_VERSION:-v1}"
+if [[ "$TTT_VERSION" != "v1" && "$TTT_VERSION" != "v2" ]]; then
+  printf 'ERROR: TTT_VERSION must be v1 or v2, got %s\n' "$TTT_VERSION" >&2
+  exit 2
+fi
+WARMUP_CONFIG="pi05_tactile_ttt_${TTT_VERSION}_warmup"
+JOINT_CONFIG="pi05_tactile_ttt_${TTT_VERSION}"
+WARMUP_EXP="${WARMUP_EXP:-pi05_tactile_ttt_${TTT_VERSION}_warmup_${RUN_TAG}}"
+JOINT_EXP="${JOINT_EXP:-pi05_tactile_ttt_${TTT_VERSION}_twostage_joint_${RUN_TAG}}"
 
 WARMUP_STEPS="${WARMUP_STEPS:-250}"
 JOINT_STEPS="${JOINT_STEPS:-750}"
@@ -121,6 +126,7 @@ check_new_output_dir "$JOINT_DIR"
 mkdir -p logs "$HF_DATASETS_CACHE"
 
 log "Run tag: $RUN_TAG"
+log "TactileTTT version: $TTT_VERSION"
 log "GPUs: $GPU_IDS; FSDP devices: $FSDP_DEVICES; global batch: $BATCH_SIZE"
 log "Stage 1: $WARMUP_CONFIG/$WARMUP_EXP ($WARMUP_STEPS steps)"
 log "Stage 2: $JOINT_CONFIG/$JOINT_EXP ($JOINT_STEPS steps)"
