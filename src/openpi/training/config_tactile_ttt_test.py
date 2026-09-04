@@ -84,3 +84,20 @@ def test_single_and_two_stage_ttt_disable_teacher_and_auxiliary_paths():
         assert not model.async_tactile_refiner_enabled
         assert not model.async_tactile_flow_refiner_enabled
         assert not model.cached_vlm_async_ae_enabled
+
+
+def test_v2_uses_temporal_hybrid_ttt_without_changing_v1():
+    v1 = training_config.get_config("pi05_tactile_ttt_v1")
+    warmup = training_config.get_config("pi05_tactile_ttt_v2_warmup")
+    v2 = training_config.get_config("pi05_tactile_ttt_v2")
+
+    assert v1.model.tactile_ttt_mode == "v1"
+    assert v1.model.tactile_ttt_layer_period == 1
+    assert v1.model.tactile_ttt_residual_gate_init == 0.001
+    assert warmup.model == v2.model
+    assert warmup.data == v2.data
+    assert v2.model.tactile_ttt_mode == "v2"
+    assert v2.model.tactile_ttt_layer_period == 3
+    assert v2.model.tactile_ttt_layer_offset == 2
+    assert v2.model.tactile_ttt_residual_gate_init == 0.01
+    assert v2.policy_metadata["tactile_ttt_mode"] == "v2"

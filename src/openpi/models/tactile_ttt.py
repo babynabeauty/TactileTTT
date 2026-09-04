@@ -40,10 +40,36 @@ class LayerwiseTactileTTT(nn.Module):
         fast_state: TactileTTTState,
         write_gate: jax.Array,
         update_mask: jax.Array,
+        write_tokens: jax.Array | None = None,
+        target_tokens: jax.Array | None = None,
+        layer_active: jax.Array | float = 1.0,
     ) -> tuple[jax.Array, TactileTTTState, dict[str, jax.Array]]:
+        """Read memory for ``tokens`` and optionally learn temporal bindings.
+
+        V1 leaves ``write_tokens``/``target_tokens`` unset and binds three
+        projections of the same action-expert token sequence. V2 supplies
+        adjacent tactile sequences: K comes from frames [0..T-2], V from
+        frames [1..T-1], while Q still comes from the current expert tokens.
+        """
         normalized = nn.LayerNorm(name="token_norm")(tokens)
-        keys = nn.Dense(self.memory_dim, use_bias=False, name="key_proj")(normalized).astype(jnp.float32)
-        values = nn.Dense(self.memory_dim, use_bias=False, name="value_proj")(normalized).astype(jnp.float32)
+        if write_tokens is None:
+            if target_tokens is not None:
+                raise ValueError("target_tokens requires write_tokens.")
+            normalized_write = normalized
+            normalized_target = normalized
+        else:
+            if target_tokens is None:
+                raise ValueError("write_tokens requires target_tokens.")
+            if write_tokens.shape[:2] != target_tokens.shape[:2]:
+                raise ValueError(
+                    "Temporal TTT write and target sequences must have equal batch/token dimensions; "
+                    f"got {write_tokens.shape} and {target_tokens.shape}."
+                )
+            normalized_write = nn.LayerNorm(name="write_norm")(write_tokens)
+            normalized_target = nn.LayerNorm(name="target_norm")(target_tokens)
+
+        keys = nn.Dense(self.memory_dim, use_bias=False, name="key_proj")(normalized_write).astype(jnp.float32)
+        values = nn.Dense(self.memory_dim, use_bias=False, name="value_proj")(normalized_target).astype(jnp.float32)
         queries = nn.Dense(self.memory_dim, use_bias=False, name="query_proj")(normalized).astype(jnp.float32)
 
         w1, b1, w2, b2 = (jnp.asarray(value, dtype=jnp.float32) for value in fast_state)
@@ -71,7 +97,10 @@ class LayerwiseTactileTTT(nn.Module):
         update_mask = jnp.asarray(update_mask, dtype=jnp.float32)
         if update_mask.ndim == 0:
             update_mask = jnp.broadcast_to(update_mask, write_gate.shape)
-        effective_lr = inner_lr * write_gate.astype(jnp.float32) * update_mask
+        layer_active = jnp.asarray(layer_active, dtype=jnp.float32)
+        if layer_active.ndim == 0:
+            layer_active = jnp.broadcast_to(layer_active, write_gate.shape)
+        effective_lr = inner_lr * write_gate.astype(jnp.float32) * update_mask * layer_active
 
         updated_state = (
             w1 - effective_lr[:, None, None] * gradients[0],
@@ -96,7 +125,9 @@ class LayerwiseTactileTTT(nn.Module):
             (self.width,),
         )
         residual_gate = jnp.tanh(residual_gate_raw).astype(tokens.dtype)
-        contribution = (residual_gate[None, None, :] * memory).astype(tokens.dtype)
+        contribution = (
+            residual_gate[None, None, :] * memory * layer_active[:, None, None].astype(tokens.dtype)
+        ).astype(tokens.dtype)
         enhanced = (tokens + contribution).astype(tokens.dtype)
 
         def state_norm(state: TactileTTTState) -> jax.Array:
@@ -111,7 +142,7 @@ class LayerwiseTactileTTT(nn.Module):
         token_norm = jnp.linalg.norm(tokens.astype(jnp.float32), axis=(1, 2))
         stats = {
             "contact_gate": write_gate.astype(jnp.float32),
-            "reconstruction": reconstruction,
+            "reconstruction": reconstruction * layer_active,
             "fast_weight_norm": state_norm(updated_state),
             "fast_weight_update_norm": state_norm(state_delta),
             "inner_lr": jnp.broadcast_to(inner_lr.astype(jnp.float32), write_gate.shape),
@@ -122,5 +153,6 @@ class LayerwiseTactileTTT(nn.Module):
             ),
             "memory_contribution_norm": contribution_norm,
             "memory_to_current_ratio": contribution_norm / (token_norm + 1e-6),
+            "_layer_active": layer_active,
         }
         return enhanced, updated_state, stats

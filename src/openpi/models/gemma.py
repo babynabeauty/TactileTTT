@@ -56,6 +56,9 @@ class Config:
     tactile_ttt_mlp_dim: int = 0
     tactile_ttt_inner_lr: float = 0.1
     tactile_ttt_residual_gate_init: float = 0.001
+    tactile_ttt_mode: Literal["v1", "v2"] = "v1"
+    tactile_ttt_layer_period: int = 1
+    tactile_ttt_layer_offset: int = 0
 
 
 Variant = Literal["dummy", "gemma_300m", "gemma_300m_lora", "gemma_2b", "gemma_2b_lora"]
@@ -329,6 +332,9 @@ class Block(nn.Module):
         tactile_ttt_state,
         tactile_ttt_write_gate,
         tactile_ttt_update_mask,
+        tactile_ttt_write_tokens,
+        tactile_ttt_target_tokens,
+        tactile_ttt_layer_active,
         deterministic=True,  # noqa: FBT002
     ):
         xs = sharding.activation_sharding_constraint(xs)
@@ -345,6 +351,7 @@ class Block(nn.Module):
             gates.append(gate if x is not None else None)
 
         pre_attn = sharding.activation_sharding_constraint(pre_attn)
+        block_inputs = xs
         post_attn, kv_cache = attn(pre_attn, positions, attn_mask, kv_cache)
         post_attn = jax.tree.map(lambda x: drop(x, deterministic), post_attn)
         post_attn = sharding.activation_sharding_constraint(post_attn)
@@ -361,6 +368,11 @@ class Block(nn.Module):
             if xs[expert_index] is not None:
                 if tactile_ttt_state is None:
                     raise ValueError("Layer-wise TactileTTT requires an explicit fast-weight state.")
+                ttt_query_tokens = (
+                    block_inputs[expert_index]
+                    if config.tactile_ttt_mode == "v2"
+                    else xs[expert_index]
+                )
                 enhanced, tactile_ttt_state, tactile_ttt_stats = LayerwiseTactileTTT(
                     width=config.width,
                     memory_dim=config.tactile_ttt_memory_dim,
@@ -369,12 +381,21 @@ class Block(nn.Module):
                     residual_gate_init=config.tactile_ttt_residual_gate_init,
                     name="tactile_ttt",
                 )(
-                    xs[expert_index],
+                    ttt_query_tokens,
                     tactile_ttt_state,
                     tactile_ttt_write_gate,
                     tactile_ttt_update_mask,
+                    write_tokens=(tactile_ttt_write_tokens if config.tactile_ttt_mode == "v2" else None),
+                    target_tokens=(tactile_ttt_target_tokens if config.tactile_ttt_mode == "v2" else None),
+                    layer_active=tactile_ttt_layer_active,
                 )
-                xs[expert_index] = enhanced
+                # V2 is parallel to attention: its residual is computed from
+                # the block input and then added beside the attention branch.
+                # V1 retains the original sequential post-attention behavior.
+                if config.tactile_ttt_mode == "v2":
+                    xs[expert_index] = xs[expert_index] + (enhanced - ttt_query_tokens)
+                else:
+                    xs[expert_index] = enhanced
                 xs = sharding.activation_sharding_constraint(xs)
 
         out = []
@@ -431,7 +452,7 @@ class Module(nn.Module):
         block_cls = nn.remat(
             Block,
             prevent_cse=False,
-            static_argnums=(8,),
+            static_argnums=(11,),
             policy=jax.checkpoint_policies.nothing_saveable,
         )
         self.layers = nn.scan(
@@ -447,6 +468,9 @@ class Module(nn.Module):
                 nn.broadcast,
                 nn.broadcast,
                 nn.broadcast,
+                nn.broadcast,
+                nn.broadcast,
+                0,
             ),
             length=self.configs[0].depth,
         )(
@@ -480,6 +504,8 @@ class Module(nn.Module):
         tactile_ttt_state: TactileTTTState | None = None,
         tactile_ttt_write_gate: jax.Array | None = None,
         tactile_ttt_update_mask: jax.Array | None = None,
+        tactile_ttt_write_tokens: jax.Array | None = None,
+        tactile_ttt_target_tokens: jax.Array | None = None,
     ) -> Any:
         embedded = jax.tree.map(lambda e: e.astype(self.embed_dtype), embedded)
         mask = jnp.asarray(mask)[:, None, :, :]
@@ -512,6 +538,34 @@ class Module(nn.Module):
             tactile_ttt_write_gate = jnp.zeros((batch_size,), dtype=jnp.float32)
             tactile_ttt_update_mask = jnp.zeros((batch_size,), dtype=jnp.float32)
 
+        if ttt_enabled:
+            config = next(config for config in self.configs if config.tactile_ttt_memory_dim > 0)
+            if config.tactile_ttt_mode == "v2" and state_was_supplied:
+                if tactile_ttt_write_tokens is None or tactile_ttt_target_tokens is None:
+                    raise ValueError("TactileTTT-v2 requires temporal write and target tokens.")
+            elif config.tactile_ttt_mode == "v2":
+                # Prefix-only cache construction does not execute the action
+                # expert or TTT branch, so temporal bindings are unnecessary.
+                batch_size = next(value.shape[0] for value in embedded if value is not None)
+                tactile_ttt_write_tokens = jnp.zeros((batch_size, 0, config.width), dtype=self.embed_dtype)
+                tactile_ttt_target_tokens = jnp.zeros((batch_size, 0, config.width), dtype=self.embed_dtype)
+            else:
+                # Mapped dummy arrays keep the lifted scan signature uniform;
+                # V1 never consumes them.
+                batch_size = next(value.shape[0] for value in embedded if value is not None)
+                tactile_ttt_write_tokens = jnp.zeros((batch_size, 0, config.width), dtype=self.embed_dtype)
+                tactile_ttt_target_tokens = jnp.zeros((batch_size, 0, config.width), dtype=self.embed_dtype)
+            layer_ids = jnp.arange(config.depth, dtype=jnp.int32)
+            tactile_ttt_layer_active = (
+                (layer_ids % config.tactile_ttt_layer_period) == config.tactile_ttt_layer_offset
+            ).astype(jnp.float32)
+        else:
+            batch_size = next(value.shape[0] for value in embedded if value is not None)
+            width = self.configs[-1].width
+            tactile_ttt_write_tokens = jnp.zeros((batch_size, 0, width), dtype=self.embed_dtype)
+            tactile_ttt_target_tokens = jnp.zeros((batch_size, 0, width), dtype=self.embed_dtype)
+            tactile_ttt_layer_active = jnp.zeros((self.configs[0].depth,), dtype=jnp.float32)
+
         embedded, (kv_cache, layer_hiddens, tactile_ttt_state, tactile_ttt_stats) = self.layers(
             embedded,
             kv_cache,
@@ -521,6 +575,9 @@ class Module(nn.Module):
             tactile_ttt_state,
             tactile_ttt_write_gate,
             tactile_ttt_update_mask,
+            tactile_ttt_write_tokens,
+            tactile_ttt_target_tokens,
+            tactile_ttt_layer_active,
             deterministic,
         )
 
@@ -568,6 +625,8 @@ class Module(nn.Module):
         ttt_configs = [config for config in self.configs if config.tactile_ttt_memory_dim > 0]
         tactile_ttt_state = None
         tactile_ttt_write_gate = None
+        tactile_ttt_write_tokens = None
+        tactile_ttt_target_tokens = None
         if ttt_configs:
             config = ttt_configs[0]
             tactile_ttt_state = (
@@ -577,6 +636,9 @@ class Module(nn.Module):
                 jnp.zeros((config.depth, 1, config.tactile_ttt_memory_dim)),
             )
             tactile_ttt_write_gate = jnp.ones((1,), dtype=jnp.float32)
+            if config.tactile_ttt_mode == "v2":
+                tactile_ttt_write_tokens = jnp.zeros((1, 5, config.width), dtype=self.embed_dtype)
+                tactile_ttt_target_tokens = jnp.zeros((1, 5, config.width), dtype=self.embed_dtype)
         self(
             [jnp.zeros((1, 1, c.width)) for c in self.configs],
             jnp.zeros((1, len(self.configs)), dtype=jnp.int32),
@@ -584,6 +646,8 @@ class Module(nn.Module):
             adarms_cond=[jnp.zeros((1, c.width)) if u else None for u, c in zip(use_adarms, self.configs, strict=True)],
             tactile_ttt_state=tactile_ttt_state,
             tactile_ttt_write_gate=tactile_ttt_write_gate,
+            tactile_ttt_write_tokens=tactile_ttt_write_tokens,
+            tactile_ttt_target_tokens=tactile_ttt_target_tokens,
         )
 
 

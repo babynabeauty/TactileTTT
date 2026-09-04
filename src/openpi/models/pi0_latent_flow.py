@@ -194,6 +194,9 @@ class Pi0LatentFlow(_model.BaseModel):
         self.tactile_ttt_residual_gate_init = float(getattr(config, "tactile_ttt_residual_gate_init", 0.001))
         self.tactile_ttt_contact_threshold = float(getattr(config, "tactile_ttt_contact_threshold", 4.3))
         self.tactile_ttt_contact_temperature = float(getattr(config, "tactile_ttt_contact_temperature", 0.5))
+        self.tactile_ttt_mode = str(getattr(config, "tactile_ttt_mode", "v1"))
+        self.tactile_ttt_layer_period = int(getattr(config, "tactile_ttt_layer_period", 1))
+        self.tactile_ttt_layer_offset = int(getattr(config, "tactile_ttt_layer_offset", 0))
         self.sequence_training = self.tactile_ttt_enabled
         self.use_teacher_ae = not (self.disable_future_tactile or self.direct_future_tactile_align)
         # The TactileTTT path is deliberately student-only.  Keep the legacy
@@ -295,6 +298,9 @@ class Pi0LatentFlow(_model.BaseModel):
                 tactile_ttt_mlp_dim=self.tactile_ttt_mlp_dim,
                 tactile_ttt_inner_lr=self.tactile_ttt_inner_lr,
                 tactile_ttt_residual_gate_init=self.tactile_ttt_residual_gate_init,
+                tactile_ttt_mode=self.tactile_ttt_mode,
+                tactile_ttt_layer_period=self.tactile_ttt_layer_period,
+                tactile_ttt_layer_offset=self.tactile_ttt_layer_offset,
             )
         teacher_config = student_config
         if not self.tactile_ttt_enabled:
@@ -789,19 +795,38 @@ class Pi0LatentFlow(_model.BaseModel):
 
     def _tactile_ttt_inputs(
         self, history_effort: at.Array, contact_force: at.Array, *, active: at.Array | None = None
-    ) -> tuple[at.Array, at.Array]:
-        """Return current tactile tokens and a physical-force write gate.
+    ) -> tuple[at.Array, at.Array | None, at.Array | None, at.Array]:
+        """Return suffix, temporal-write, temporal-target tokens and gate.
 
         Long history is carried by the per-layer fast weights. Only the current
-        five finger tokens enter the action-expert suffix directly.
+        five finger tokens enter the action-expert suffix directly. V2 uses the
+        other history frames only as self-supervised adjacent-frame bindings;
+        they never enter the ordinary Transformer context.
         """
         if not self.tactile_ttt_enabled:
             raise ValueError("This model was not configured with TactileTTT.")
         history_times = jnp.asarray(self.history_times, dtype=jnp.float32)
-        current_tokens = self.student_force_tokenizer.encode_history(
-            history_effort[:, -1:, ...],
-            history_times[-1:],
-        )
+        if self.tactile_ttt_mode == "v2":
+            all_tokens = self.student_force_tokenizer.encode_history(history_effort, history_times)
+            batch_size = all_tokens.shape[0]
+            all_tokens = all_tokens.reshape(
+                batch_size,
+                self.force_input_frames,
+                self.tactile_tokens_per_step,
+                all_tokens.shape[-1],
+            )
+            current_tokens = all_tokens[:, -1].reshape(batch_size, self.tactile_tokens_per_step, -1)
+            # Predict every finger's next tactile representation from the same
+            # finger one frame earlier: (T-1)*F = 15*5 = 75 bindings.
+            temporal_write_tokens = all_tokens[:, :-1].reshape(batch_size, -1, all_tokens.shape[-1])
+            temporal_target_tokens = all_tokens[:, 1:].reshape(batch_size, -1, all_tokens.shape[-1])
+        else:
+            current_tokens = self.student_force_tokenizer.encode_history(
+                history_effort[:, -1:, ...],
+                history_times[-1:],
+            )
+            temporal_write_tokens = None
+            temporal_target_tokens = None
         write_gate = tactile_contact_gate(
             contact_force,
             threshold=self.tactile_ttt_contact_threshold,
@@ -809,7 +834,7 @@ class Pi0LatentFlow(_model.BaseModel):
         )
         if active is not None:
             write_gate = write_gate * active.astype(write_gate.dtype)
-        return current_tokens, write_gate
+        return current_tokens, temporal_write_tokens, temporal_target_tokens, write_gate
 
     def _tactile_contact_force(self, observation: _model.Observation) -> at.Array:
         contact_force = observation.tactile_contact_force
@@ -1991,6 +2016,8 @@ class Pi0LatentFlow(_model.BaseModel):
         tactile_ttt_state: TactileTTTState | None = None,
         tactile_ttt_write_gate: at.Array | None = None,
         tactile_ttt_update_mask: at.Array | None = None,
+        tactile_ttt_write_tokens: at.Array | None = None,
+        tactile_ttt_target_tokens: at.Array | None = None,
     ) -> tuple[
         at.Float[at.Array, "b s d"],
         tuple[at.Float[at.Array, "b s d"], ...],
@@ -2039,11 +2066,28 @@ class Pi0LatentFlow(_model.BaseModel):
                 tactile_ttt_state=tactile_ttt_state,
                 tactile_ttt_write_gate=tactile_ttt_write_gate,
                 tactile_ttt_update_mask=tactile_ttt_update_mask,
+                tactile_ttt_write_tokens=tactile_ttt_write_tokens,
+                tactile_ttt_target_tokens=tactile_ttt_target_tokens,
                 **llm_kwargs,
             )
         student_out = outputs[1]
         student_layer_hiddens = tuple(layer[1] for layer in selected_layers)
         return student_out, student_layer_hiddens, tactile_ttt_state, tactile_ttt_stats
+
+    @staticmethod
+    def _reduce_tactile_ttt_layer_stats(layer_stats: dict[str, at.Array]) -> dict[str, at.Array]:
+        """Average diagnostics over enabled TTT layers only."""
+        if not layer_stats:
+            return {}
+        active = layer_stats.get("_layer_active")
+        if active is None:
+            return jax.tree.map(lambda value: jnp.mean(value, axis=0), layer_stats)
+        denom = jnp.maximum(jnp.sum(active, axis=0), 1.0)
+        return {
+            key: jnp.sum(value * active, axis=0) / denom
+            for key, value in layer_stats.items()
+            if key != "_layer_active"
+        }
 
     def _compute_chunk_loss_with_stats(
         self,
@@ -2092,12 +2136,19 @@ class Pi0LatentFlow(_model.BaseModel):
         tactile_ttt_stats: dict[str, at.Array] = {}
         history_token_override = None
         tactile_ttt_write_gate = None
+        tactile_ttt_write_tokens = None
+        tactile_ttt_target_tokens = None
         if self.tactile_ttt_enabled:
             if tactile_ttt_state is None:
                 tactile_ttt_state = self.initial_tactile_ttt_state(history_effort.shape[0])
             if sequence_active is None:
                 sequence_active = jnp.ones((history_effort.shape[0],), dtype=jnp.float32)
-            history_token_override, tactile_ttt_write_gate = self._tactile_ttt_inputs(
+            (
+                history_token_override,
+                tactile_ttt_write_tokens,
+                tactile_ttt_target_tokens,
+                tactile_ttt_write_gate,
+            ) = self._tactile_ttt_inputs(
                 history_effort,
                 self._tactile_contact_force(observation),
                 active=sequence_active,
@@ -2158,9 +2209,11 @@ class Pi0LatentFlow(_model.BaseModel):
                 tactile_ttt_state=tactile_ttt_state,
                 tactile_ttt_write_gate=tactile_ttt_write_gate,
                 tactile_ttt_update_mask=sequence_active,
+                tactile_ttt_write_tokens=tactile_ttt_write_tokens,
+                tactile_ttt_target_tokens=tactile_ttt_target_tokens,
             )
             if layerwise_ttt_stats:
-                tactile_ttt_stats = jax.tree.map(lambda value: jnp.mean(value, axis=0), layerwise_ttt_stats)
+                tactile_ttt_stats = self._reduce_tactile_ttt_layer_stats(layerwise_ttt_stats)
             teacher_out = jnp.zeros((actions.shape[0], 0, self.teacher_width), dtype=student_out.dtype)
             teacher_layer_hiddens = ()
 
@@ -2678,7 +2731,12 @@ class Pi0LatentFlow(_model.BaseModel):
 
         observation = _model.preprocess_observation(None, observation, train=False, effort_type=self.effort_type)
         history_effort, _ = self._split_effort(observation, require_future=False, dtype=jnp.float32)
-        history_tokens, tactile_ttt_write_gate = self._tactile_ttt_inputs(
+        (
+            history_tokens,
+            tactile_ttt_write_tokens,
+            tactile_ttt_target_tokens,
+            tactile_ttt_write_gate,
+        ) = self._tactile_ttt_inputs(
             history_effort,
             self._tactile_contact_force(observation),
         )
@@ -2740,9 +2798,11 @@ class Pi0LatentFlow(_model.BaseModel):
                 tactile_ttt_state=fast_state,
                 tactile_ttt_write_gate=tactile_ttt_write_gate,
                 tactile_ttt_update_mask=jnp.broadcast_to(update_now, tactile_ttt_write_gate.shape),
+                tactile_ttt_write_tokens=tactile_ttt_write_tokens,
+                tactile_ttt_target_tokens=tactile_ttt_target_tokens,
             )
             velocity = self._decode_action_velocity(outputs[1], expert="student")
-            reduced_stats = jax.tree.map(lambda value: jnp.mean(value, axis=0), layer_stats)
+            reduced_stats = self._reduce_tactile_ttt_layer_stats(layer_stats)
             saved_stats = jax.tree.map(
                 lambda new, old: jnp.where(update_now, new, old),
                 reduced_stats,

@@ -60,6 +60,72 @@ def test_zero_update_mask_does_not_write_fast_weights():
     assert np.allclose(stats["fast_weight_update_norm"], 0.0)
 
 
+def test_v2_temporal_binding_uses_75_tactile_pairs_and_21_queries():
+    module = _module()
+    state = _state(2)
+    queries = jnp.ones((2, 21, 32), dtype=jnp.float32)
+    write_tokens = jax.random.normal(jax.random.key(2), (2, 75, 32))
+    target_tokens = jax.random.normal(jax.random.key(3), (2, 75, 32))
+    gate = jnp.ones((2,), dtype=jnp.float32)
+    variables = module.init(
+        jax.random.key(0),
+        queries,
+        state,
+        gate,
+        gate,
+        write_tokens=write_tokens,
+        target_tokens=target_tokens,
+    )
+
+    enhanced, updated, stats = module.apply(
+        variables,
+        queries,
+        state,
+        gate,
+        gate,
+        write_tokens=write_tokens,
+        target_tokens=target_tokens,
+    )
+
+    assert enhanced.shape == queries.shape
+    assert stats["reconstruction"].shape == (2,)
+    assert any(not np.allclose(new, old) for new, old in zip(updated, state, strict=True))
+
+
+def test_inactive_v2_layer_neither_reads_nor_writes():
+    module = _module()
+    state = _state(1)
+    queries = jnp.ones((1, 21, 32), dtype=jnp.float32)
+    write_tokens = jax.random.normal(jax.random.key(2), (1, 75, 32))
+    target_tokens = jax.random.normal(jax.random.key(3), (1, 75, 32))
+    gate = jnp.ones((1,), dtype=jnp.float32)
+    variables = module.init(
+        jax.random.key(0),
+        queries,
+        state,
+        gate,
+        gate,
+        write_tokens=write_tokens,
+        target_tokens=target_tokens,
+        layer_active=0.0,
+    )
+
+    enhanced, updated, stats = module.apply(
+        variables,
+        queries,
+        state,
+        gate,
+        gate,
+        write_tokens=write_tokens,
+        target_tokens=target_tokens,
+        layer_active=0.0,
+    )
+
+    assert np.allclose(enhanced, queries)
+    assert all(np.allclose(new, old) for new, old in zip(updated, state, strict=True))
+    assert np.allclose(stats["_layer_active"], 0.0)
+
+
 def test_vector_residual_gate_starts_near_point_zero_zero_one():
     module = _module()
     state = _state(1)
@@ -148,3 +214,55 @@ def test_gemma_action_expert_carries_one_fast_state_per_transformer_layer():
     )
     assert prefix_outputs[0].shape == prefix.shape
     assert prefix_outputs[1] is None
+
+
+def test_gemma_v2_updates_only_interleaved_layers():
+    base_config = gemma.get_config("dummy")
+    student_config = dataclasses.replace(
+        base_config,
+        tactile_ttt_memory_dim=8,
+        tactile_ttt_mlp_dim=12,
+        tactile_ttt_mode="v2",
+        tactile_ttt_layer_period=2,
+        tactile_ttt_layer_offset=1,
+    )
+    llm = nnx_bridge.ToNNX(gemma.Module(configs=[base_config, student_config], embed_dtype="bfloat16", adarms=False))
+    llm.lazy_init(rngs=nnx.Rngs(0), method="init", use_adarms=[False, False])
+
+    batch_size = 1
+    state = tuple(
+        jnp.broadcast_to(value[None, ...], (student_config.depth, *value.shape))
+        for value in _state(batch_size)
+    )
+    prefix = jnp.ones((batch_size, 3, base_config.width), dtype=jnp.bfloat16)
+    student = jnp.ones((batch_size, 21, student_config.width), dtype=jnp.bfloat16)
+    positions = jnp.broadcast_to(jnp.arange(24, dtype=jnp.int32), (batch_size, 24))
+    mask = jnp.ones((batch_size, 24, 24), dtype=jnp.bool_)
+    write_tokens = jax.random.normal(
+        jax.random.key(2), (batch_size, 75, student_config.width), dtype=jnp.bfloat16
+    )
+    target_tokens = jax.random.normal(
+        jax.random.key(3), (batch_size, 75, student_config.width), dtype=jnp.bfloat16
+    )
+
+    _, _, updated, stats = llm(
+        [prefix, student],
+        positions,
+        mask,
+        tactile_ttt_state=state,
+        tactile_ttt_write_gate=jnp.ones((batch_size,), dtype=jnp.float32),
+        tactile_ttt_write_tokens=write_tokens,
+        tactile_ttt_target_tokens=target_tokens,
+    )
+
+    for layer in range(student_config.depth):
+        changed = not np.allclose(updated[0][layer], state[0][layer])
+        assert changed == (layer % 2 == 1)
+    assert np.allclose(stats["_layer_active"][:, 0], np.array([0.0, 1.0, 0.0, 1.0]))
+
+    prefix_outputs, _ = llm(
+        [prefix, None],
+        jnp.broadcast_to(jnp.arange(3, dtype=jnp.int32), (batch_size, 3)),
+        jnp.ones((batch_size, 3, 3), dtype=jnp.bool_),
+    )
+    assert prefix_outputs[0].shape == prefix.shape

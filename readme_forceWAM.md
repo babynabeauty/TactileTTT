@@ -227,8 +227,8 @@ aws s3 cp /Users/babyna/FactileLDM/data/press_button_4_times s3://sqzhang26-2/pr
 
 
 # 大文件上传  mac支持\
-s3cmd put //Users/babyna/FactileLDM/data/press_button_4_times.zip  \
-  s3://sqzhang26-2/press_button_4_times.zip
+s3cmd put /Users/babyna/TactileTTT/data/press_button_4_times_merged_filtered.tar.gz \
+  s3://sqzhang26-2/press_button_4_times_merged_filtered.tar.gz
 
 
 

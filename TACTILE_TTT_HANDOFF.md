@@ -1,7 +1,7 @@
 # TactileTTT 项目交接文档
 
 用途：将本文件交给新的 Codex 对话，使其直接继续当前工作。  
-更新时间：2026-08-31
+更新时间：2026-09-03
 本地仓库：/Users/babyna/TactileTTT  
 服务器仓库：/workspace/mnt/sqzhang26/TactileTTT
 
@@ -432,3 +432,29 @@ TPE预训练配置属于PI0，原本使用z-score；接入π0.5后被切换为qu
 请先完整阅读本文件，然后继续：
 
 > 在不提交代码的前提下，验证pi05_tactile_ttt_v1逐层TTT-MLP实现。门控使用过去16帧五指未归一化calc_force最大合力，threshold=4.3 N，temperature=0.5 N；TPE仍使用z-score raw tactile。训练与部署每个action chunk只提交一次fast-state更新，不从旧v0 checkpoint续训。
+
+## 16. TactileTTT-v2（2026-09-03）
+
+新增配置：
+
+    pi05_tactile_ttt_v2_warmup
+    pi05_tactile_ttt_v2
+
+v1中每个Action Expert block的TTT对完整suffix做K/V/Q投影，因此每个投影均有21个token：
+
+    5个当前帧手指触觉token + 16个带噪action token
+
+v2改为：
+
+- 普通Action Expert suffix仍为5个当前触觉token+16个action token，共21个Q；
+- 16帧触觉经TPE得到80个token，构造相邻帧同手指预测对；
+- K使用前15帧，共15×5=75个token；V使用后15帧，共75个token；
+- 只在Action Expert第2/5/8/11/14/17层启用TTT，其余层作为Transformer anchor；
+- TTT残差从block输入并行产生，再与attention残差相加；
+- contact gate仍只控制fast-weight写入，读取不受门控；
+- residual gate初始化从0.001提高到0.01；
+- v1配置、参数结构与已有checkpoint入口继续保留。
+
+本地已通过Python 3.14语法编译和`git diff --check`。Mac环境不能安装CUDA JAX，仍需在服务器运行：
+
+    pytest -q src/openpi/models/tactile_ttt_test.py src/openpi/training/config_tactile_ttt_test.py

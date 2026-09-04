@@ -2283,9 +2283,15 @@ _CONFIGS.extend(
 )
 
 
-def _pi05_tactile_ttt_v1_config(source_name: str, new_name: str) -> TrainConfig:
-    """Pi0.5 with RoboTTT-style layer-wise tactile fast-weight memory."""
+def _pi05_tactile_ttt_config(
+    source_name: str,
+    new_name: str,
+    *,
+    mode: Literal["v1", "v2"],
+) -> TrainConfig:
+    """Pi0.5 with layer-wise tactile fast-weight memory."""
     source = next(config for config in _CONFIGS if config.name == source_name)
+    is_v2 = mode == "v2"
     return dataclasses.replace(
         source,
         name=new_name,
@@ -2302,9 +2308,14 @@ def _pi05_tactile_ttt_v1_config(source_name: str, new_name: str) -> TrainConfig:
             tactile_ttt_memory_dim=256,
             tactile_ttt_mlp_dim=256,
             tactile_ttt_inner_lr=0.1,
-            tactile_ttt_residual_gate_init=0.001,
             tactile_ttt_contact_threshold=4.3,
             tactile_ttt_contact_temperature=0.5,
+            tactile_ttt_mode=mode,
+            # V1 keeps all 18 layers. V2 follows a hybrid layout: two anchor
+            # Transformer blocks, then one TTT-enhanced block (6/18 total).
+            tactile_ttt_layer_period=3 if is_v2 else 1,
+            tactile_ttt_layer_offset=2 if is_v2 else 0,
+            tactile_ttt_residual_gate_init=0.01 if is_v2 else 0.001,
             use_future_flow=False,
             tactile_refiner_enabled=False,
             async_tactile_refiner_enabled=False,
@@ -2331,6 +2342,7 @@ def _pi05_tactile_ttt_v1_config(source_name: str, new_name: str) -> TrainConfig:
             "tactile_history_offsets": tuple(range(-15, 1)),
             "action_horizon": 16,
             "tactile_ttt_enabled": True,
+            "tactile_ttt_mode": mode,
         },
         batch_size=1,
         # Episode-sequence TTT batches require substantial video decoding.
@@ -2343,15 +2355,30 @@ def _pi05_tactile_ttt_v1_config(source_name: str, new_name: str) -> TrainConfig:
 _CONFIGS.extend(
     [
         dataclasses.replace(
-            _pi05_tactile_ttt_v1_config(
+            _pi05_tactile_ttt_config(
                 "pi0_xhand_tactile_structured_patch_informed_raw_dual_ae",
                 "pi05_tactile_ttt_v1_warmup",
+                mode="v1",
             ),
             freeze_filter=freeze_except_tactile_ttt(),
         ),
-        _pi05_tactile_ttt_v1_config(
+        _pi05_tactile_ttt_config(
             "pi0_xhand_tactile_structured_patch_informed_raw_dual_ae",
             "pi05_tactile_ttt_v1",
+            mode="v1",
+        ),
+        dataclasses.replace(
+            _pi05_tactile_ttt_config(
+                "pi0_xhand_tactile_structured_patch_informed_raw_dual_ae",
+                "pi05_tactile_ttt_v2_warmup",
+                mode="v2",
+            ),
+            freeze_filter=freeze_except_tactile_ttt(),
+        ),
+        _pi05_tactile_ttt_config(
+            "pi0_xhand_tactile_structured_patch_informed_raw_dual_ae",
+            "pi05_tactile_ttt_v2",
+            mode="v2",
         ),
     ]
 )

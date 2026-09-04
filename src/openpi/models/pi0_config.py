@@ -277,6 +277,9 @@ class Pi0LatentFlowConfig(Pi0Config):
     tactile_ttt_residual_gate_init: float = 0.001
     tactile_ttt_contact_threshold: float = 4.3
     tactile_ttt_contact_temperature: float = 0.5
+    tactile_ttt_mode: Literal["v1", "v2"] = "v1"
+    tactile_ttt_layer_period: int = 1
+    tactile_ttt_layer_offset: int = 0
     future_tactile_align_layer: int = 12
     tactile_sample_hz: float = 15.0
     arm_hand_mask_attention: bool = False
@@ -408,6 +411,14 @@ class Pi0LatentFlowConfig(Pi0Config):
                     raise ValueError("TactileTTT inner_lr must be positive.")
                 if self.tactile_ttt_contact_temperature <= 0:
                     raise ValueError("TactileTTT contact temperature must be positive.")
+                if self.tactile_ttt_mode not in ("v1", "v2"):
+                    raise ValueError(f"Unsupported tactile_ttt_mode={self.tactile_ttt_mode!r}.")
+                if self.tactile_ttt_layer_period <= 0:
+                    raise ValueError("TactileTTT layer period must be positive.")
+                if not 0 <= self.tactile_ttt_layer_offset < self.tactile_ttt_layer_period:
+                    raise ValueError("TactileTTT layer offset must be inside [0, layer_period).")
+                if self.tactile_ttt_mode == "v2" and self.force_input_frames < 2:
+                    raise ValueError("TactileTTT-v2 temporal prediction requires at least two tactile frames.")
                 if self.use_future_flow:
                     raise ValueError("TactileTTT does not use future-flow auxiliary tokens.")
                 if self.tactile_patch_aux_loss_weight > 0:
