@@ -59,6 +59,7 @@ class Config:
     tactile_ttt_mode: Literal["v1", "v2"] = "v1"
     tactile_ttt_layer_period: int = 1
     tactile_ttt_layer_offset: int = 0
+    tactile_ttt_noop: bool = False
 
 
 Variant = Literal["dummy", "gemma_300m", "gemma_300m_lora", "gemma_2b", "gemma_2b_lora"]
@@ -379,6 +380,7 @@ class Block(nn.Module):
                     mlp_dim=config.tactile_ttt_mlp_dim,
                     base_inner_lr=config.tactile_ttt_inner_lr,
                     residual_gate_init=config.tactile_ttt_residual_gate_init,
+                    noop=config.tactile_ttt_noop,
                     name="tactile_ttt",
                 )(
                     ttt_query_tokens,
@@ -470,7 +472,7 @@ class Module(nn.Module):
                 nn.broadcast,
                 nn.broadcast,
                 nn.broadcast,
-                0,
+                nn.broadcast,
             ),
             length=self.configs[0].depth,
         )(

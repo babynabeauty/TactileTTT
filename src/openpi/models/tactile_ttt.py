@@ -32,6 +32,7 @@ class LayerwiseTactileTTT(nn.Module):
     mlp_dim: int
     base_inner_lr: float
     residual_gate_init: float = 0.001
+    noop: bool = False
 
     @nn.compact
     def __call__(
@@ -100,7 +101,8 @@ class LayerwiseTactileTTT(nn.Module):
         layer_active = jnp.asarray(layer_active, dtype=jnp.float32)
         if layer_active.ndim == 0:
             layer_active = jnp.broadcast_to(layer_active, write_gate.shape)
-        effective_lr = inner_lr * write_gate.astype(jnp.float32) * update_mask * layer_active
+        noop_scale = jnp.asarray(0.0 if self.noop else 1.0, dtype=jnp.float32)
+        effective_lr = inner_lr * write_gate.astype(jnp.float32) * update_mask * layer_active * noop_scale
 
         updated_state = (
             w1 - effective_lr[:, None, None] * gradients[0],
@@ -126,7 +128,10 @@ class LayerwiseTactileTTT(nn.Module):
         )
         residual_gate = jnp.tanh(residual_gate_raw).astype(tokens.dtype)
         contribution = (
-            residual_gate[None, None, :] * memory * layer_active[:, None, None].astype(tokens.dtype)
+            residual_gate[None, None, :]
+            * memory
+            * layer_active[:, None, None].astype(tokens.dtype)
+            * noop_scale.astype(tokens.dtype)
         ).astype(tokens.dtype)
         enhanced = (tokens + contribution).astype(tokens.dtype)
 

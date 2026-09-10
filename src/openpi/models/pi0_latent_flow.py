@@ -197,6 +197,7 @@ class Pi0LatentFlow(_model.BaseModel):
         self.tactile_ttt_mode = str(getattr(config, "tactile_ttt_mode", "v1"))
         self.tactile_ttt_layer_period = int(getattr(config, "tactile_ttt_layer_period", 1))
         self.tactile_ttt_layer_offset = int(getattr(config, "tactile_ttt_layer_offset", 0))
+        self.tactile_ttt_noop = bool(getattr(config, "tactile_ttt_noop", False))
         self.sequence_training = self.tactile_ttt_enabled
         self.use_teacher_ae = not (self.disable_future_tactile or self.direct_future_tactile_align)
         # The TactileTTT path is deliberately student-only.  Keep the legacy
@@ -301,6 +302,7 @@ class Pi0LatentFlow(_model.BaseModel):
                 tactile_ttt_mode=self.tactile_ttt_mode,
                 tactile_ttt_layer_period=self.tactile_ttt_layer_period,
                 tactile_ttt_layer_offset=self.tactile_ttt_layer_offset,
+                tactile_ttt_noop=self.tactile_ttt_noop,
             )
         teacher_config = student_config
         if not self.tactile_ttt_enabled:

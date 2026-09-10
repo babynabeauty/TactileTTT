@@ -280,6 +280,7 @@ class Pi0LatentFlowConfig(Pi0Config):
     tactile_ttt_mode: Literal["v1", "v2"] = "v1"
     tactile_ttt_layer_period: int = 1
     tactile_ttt_layer_offset: int = 0
+    tactile_ttt_noop: bool = False
     future_tactile_align_layer: int = 12
     tactile_sample_hz: float = 15.0
     arm_hand_mask_attention: bool = False

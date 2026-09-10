@@ -2380,6 +2380,21 @@ _CONFIGS.extend(
             "pi05_tactile_ttt_v2",
             mode="v2",
         ),
+                dataclasses.replace(
+            _pi05_tactile_ttt_config(
+                "pi0_xhand_tactile_structured_patch_informed_raw_dual_ae",
+                "pi05_tactile_ttt_v1_noop",
+                mode="v1",
+            ),
+            model=dataclasses.replace(
+                _pi05_tactile_ttt_config(
+                    "pi0_xhand_tactile_structured_patch_informed_raw_dual_ae",
+                    "pi05_tactile_ttt_v1_noop",
+                    mode="v1",
+                ).model,
+                tactile_ttt_noop=True,
+            ),
+        ),
     ]
 )
 
