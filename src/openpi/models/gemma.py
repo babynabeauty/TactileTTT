@@ -471,7 +471,7 @@ class Module(nn.Module):
                 nn.broadcast,
                 nn.broadcast,
                 nn.broadcast,
-                nn.broadcast,
+                0,
                 nn.broadcast,
             ),
             length=self.configs[0].depth,
