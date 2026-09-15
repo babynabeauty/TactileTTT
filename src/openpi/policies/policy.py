@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+import collections
 import logging
 import pathlib
 import time
@@ -106,6 +107,10 @@ class Policy(BasePolicy):
         self._is_pytorch_model = is_pytorch
         self._pytorch_device = pytorch_device
         self._debug_infer_count = 0
+        self._tactile_history_frames = int(getattr(model, "force_input_frames", 16))
+        self._state_history: collections.deque[np.ndarray] = collections.deque(
+            maxlen=self._tactile_history_frames
+        )
         self._async_input_cache: dict[int, dict[str, Any]] = {}
         self._async_noise_cache: dict[int, jax.Array] = {}
         self._async_prefix_kv_cache: dict[int, Any] = {}
@@ -148,8 +153,46 @@ class Policy(BasePolicy):
         self._async_prefix_kv_cache.clear()
         self._async_prefix_mask_cache.clear()
         self._async_future_hidden_cache.clear()
+        self._state_history.clear()
         if not self._is_pytorch_model and getattr(self, "_sample_actions_tactile_ttt", None) is not None:
             self._tactile_ttt_state = self._model.initial_tactile_ttt_state(1)
+
+    def _extend_state_history(self, data: dict) -> None:
+        """Append the current state to a sliding window and replace the
+        single-frame state with the full history sequence so tactile
+        transforms see ``force_input_frames`` frames during online inference.
+
+        Training feeds a 16-frame state window (offsets -15..0), but a robot
+        client sends one frame at a time. This method mirrors the training
+        distribution by buffering recent states. When the window is not yet
+        full, the earliest available frame is repeated to pad the front,
+        matching ``_pad_or_crop_effort(from_end=True)`` semantics.
+        """
+        state_parent, state_key = None, None
+        for key in ("state", "observation.state", "observation/state"):
+            if key in data:
+                state_parent, state_key = data, key
+                break
+        if state_parent is None:
+            obs = data.get("observation")
+            if isinstance(obs, dict):
+                for key in ("state", "observation.state", "observation/state"):
+                    if key in obs:
+                        state_parent, state_key = obs, key
+                        break
+        if state_parent is None:
+            return
+        current = np.asarray(state_parent[state_key], dtype=np.float32)
+        if current.ndim == 2:
+            current = current[-1]
+        elif current.ndim != 1:
+            return
+        self._state_history.append(current)
+        frames = self._tactile_history_frames
+        states = list(self._state_history)
+        if len(states) < frames:
+            states = [states[0]] * (frames - len(states)) + states
+        state_parent[state_key] = np.stack(states, axis=0)
 
     def _async_chunk_id_int(self, async_chunk_id: Any) -> int:
         try:
@@ -199,6 +242,8 @@ class Policy(BasePolicy):
         inputs.pop("episode_start", None)
         if debug_index < DEBUG_INFER_PRINT_LIMIT:
             _debug_print_tree("SERVER RAW OBS FROM CLIENT", inputs, infer_index=debug_index)
+        if getattr(self, "_sample_actions_tactile_ttt", None) is not None:
+            self._extend_state_history(inputs)
         if fast_minimal:
             inputs = {
                 "state": np.asarray(inputs["state"], dtype=np.float32),

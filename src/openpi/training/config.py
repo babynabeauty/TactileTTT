@@ -2328,6 +2328,7 @@ def _pi05_tactile_ttt_config(
         data=dataclasses.replace(
             source.data,
             repo_id="data/press_button_4_times/press_button_0",
+            assets=dataclasses.replace(source.data.assets, asset_id="press_button_4_times"),
             state_delta_timestamps=tuple(range(-15, 1)),
             future_flow_key=None,
             future_wrist_flow_key=None,
